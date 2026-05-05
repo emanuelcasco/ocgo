@@ -2,6 +2,13 @@
 
 `ocgo` is a small Go CLI that lets [Claude Code](https://docs.anthropic.com/en/docs/claude-code) run against an OpenCode Go subscription. It starts a local Anthropic-compatible proxy, translates Claude Code's Anthropic Messages API requests to OpenCode Go's OpenAI-compatible chat completions endpoint, and launches `claude` with the right environment variables.
 
+```bash
+ocgo setup
+ocgo launch claude --model kimi-k2.6
+```
+
+Use your OpenCode Go subscription from Claude Code in one command — no manual proxy setup required.
+
 ## Features
 
 - Save and reuse your OpenCode Go API key.
