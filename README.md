@@ -18,11 +18,25 @@
 
 ## Installation
 
-Homebrew installation is coming soon.
+Install with Homebrew:
 
 ```bash
-# TODO: replace with the published Homebrew tap/formula
+brew install emanuelcasco/tap/ocgo
+```
+
+Or tap the repository first:
+
+```bash
+brew tap emanuelcasco/tap
 brew install ocgo
+```
+
+Build from source:
+
+```bash
+git clone https://github.com/emanuelcasco/ocgo.git
+cd ocgo
+make install
 ```
 
 ## Configuration
