@@ -1,27 +1,33 @@
 # ocgo
 
-`ocgo` is a small Go CLI that lets [Claude Code](https://docs.anthropic.com/en/docs/claude-code) run against an OpenCode Go subscription. It starts a local Anthropic-compatible proxy, translates Claude Code's Anthropic Messages API requests to OpenCode Go's OpenAI-compatible chat completions endpoint, and launches `claude` with the right environment variables.
+`ocgo` is a small Go CLI that lets [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Codex CLI](https://developers.openai.com/codex/cli/) run against an OpenCode Go subscription. It starts a local compatibility proxy, translates Claude Code's Anthropic Messages API requests when needed, exposes OpenAI-compatible endpoints for Codex, and launches tools with the right configuration.
 
 ```bash
+# 1. Setup your OpenCode API key
 ocgo setup
+
+# 2. Start coding!
 ocgo launch claude --model kimi-k2.6
+ocgo launch codex --model kimi-k2.6
 ```
 
-Use your OpenCode Go subscription from Claude Code in one command — no manual proxy setup required.
+Use your OpenCode Go subscription from Claude Code or Codex CLI in one command — no manual proxy setup required.
 
 ## Features
 
 - Save and reuse your OpenCode Go API key.
 - List known OpenCode Go model IDs.
 - Run Claude Code through OpenCode Go with one command.
+- Run Codex CLI through OpenCode Go with one command.
 - Start, stop, and inspect a local proxy server.
+- Exposes Anthropic-compatible and OpenAI-compatible local API layers.
 - Supports streaming text responses and basic tool-call translation.
 
 ## Requirements
 
 - Go 1.22 or newer.
 - A valid OpenCode Go API key.
-- Claude Code installed and available as `claude` in your `PATH` when using `ocgo launch claude`.
+- Claude Code or Codex CLI installed and available.
 
 ## Installation
 
@@ -130,6 +136,55 @@ ANTHROPIC_SMALL_FAST_MODEL=<model>
 ```
 
 If Claude Code requests a Claude model name or does not provide a model, `ocgo` defaults the upstream OpenCode Go model to `kimi-k2.6`.
+
+### Launch Codex CLI
+
+Start Codex CLI through the local proxy:
+
+```bash
+ocgo launch codex
+```
+
+Use a specific OpenCode Go model:
+
+```bash
+ocgo launch codex --model kimi-k2.6
+```
+
+Pass arguments through to Codex after `--`:
+
+```bash
+ocgo launch codex --model kimi-k2.6 -- --sandbox workspace-write
+```
+
+Configure Codex without launching it:
+
+```bash
+ocgo launch codex --config
+```
+
+When `ocgo launch codex` runs, it writes or updates this profile in `~/.codex/config.toml`:
+
+```toml
+[profiles.ocgo-launch]
+openai_base_url = "http://127.0.0.1:3456/v1/"
+forced_login_method = "api"
+model_provider = "ocgo-launch"
+model_catalog_json = "/Users/you/.codex/ocgo-models.json"
+
+[model_providers.ocgo-launch]
+name = "OpenCode Go"
+base_url = "http://127.0.0.1:3456/v1/"
+wire_api = "responses"
+```
+
+It then launches:
+
+```bash
+codex --profile ocgo-launch -m <model>
+```
+
+The Codex process receives `OPENAI_API_KEY=ocgo`; the local proxy injects your real OpenCode Go API key upstream. `ocgo` also writes `~/.codex/ocgo-models.json` so Codex has metadata for OpenCode Go model IDs such as `deepseek-v4-pro`.
 
 ## Proxy commands
 
@@ -256,23 +311,31 @@ The script builds macOS/Linux `amd64` and `arm64` archives, uploads them to GitH
 
 ## How it works
 
-`ocgo` exposes a local subset of the Anthropic API used by Claude Code:
+`ocgo` exposes a local compatibility API used by Claude Code and Codex CLI:
 
 - `GET /health`
 - `POST /v1/messages`
 - `POST /v1/messages/count_tokens`
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
 
-Requests sent to `/v1/messages` are converted into OpenAI-compatible chat completion requests and forwarded to:
+Requests sent to `/v1/messages` are converted from Anthropic Messages format into OpenAI-compatible chat completion requests.
+
+Requests sent to `/v1/chat/completions` are passed through as OpenAI-compatible chat completion requests while `ocgo` injects the configured OpenCode Go API key.
+
+Requests sent to `/v1/responses` use a lightweight OpenAI Responses API adapter for Codex CLI. The adapter converts common Responses input, tool definitions, and streaming text events to and from chat completions.
+
+All upstream requests are forwarded to:
 
 ```text
 https://opencode.ai/zen/go/v1/chat/completions
 ```
 
-Responses are converted back into Anthropic-compatible responses for Claude Code.
+Claude Code responses are converted back into Anthropic-compatible responses. Codex responses are returned in OpenAI-compatible Chat Completions or Responses API shapes depending on the requested endpoint.
 
 ## Limitations
 
-`ocgo` is intentionally lightweight. Token counting currently returns `0`, and Anthropic/OpenAI compatibility is focused on the request and response shapes needed by Claude Code rather than full API parity.
+`ocgo` is intentionally lightweight. Token counting currently returns `0`, and Anthropic/OpenAI compatibility is focused on the request and response shapes needed by Claude Code and Codex CLI rather than full API parity. The `/v1/responses` adapter is minimal and targets text/tool workflows used by Codex; it is not a complete OpenAI Responses API implementation.
 
 ## License
 

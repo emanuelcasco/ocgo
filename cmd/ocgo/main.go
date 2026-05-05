@@ -21,10 +21,11 @@ import (
 )
 
 const (
-	appName     = "ocgo"
-	defaultHost = "127.0.0.1"
-	defaultPort = 3456
-	openAIURL   = "https://opencode.ai/zen/go/v1/chat/completions"
+	appName          = "ocgo"
+	defaultHost      = "127.0.0.1"
+	defaultPort      = 3456
+	openAIURL        = "https://opencode.ai/zen/go/v1/chat/completions"
+	codexProfileName = "ocgo-launch"
 )
 
 var version = "dev"
@@ -65,6 +66,24 @@ type OAIRequest struct {
 	Temperature *float64     `json:"temperature,omitempty"`
 	TopP        *float64     `json:"top_p,omitempty"`
 	Tools       []OAITool    `json:"tools,omitempty"`
+}
+
+type ResponsesRequest struct {
+	Model        string          `json:"model"`
+	Input        json.RawMessage `json:"input"`
+	Instructions string          `json:"instructions,omitempty"`
+	Stream       bool            `json:"stream,omitempty"`
+	MaxTokens    int             `json:"max_output_tokens,omitempty"`
+	Temperature  *float64        `json:"temperature,omitempty"`
+	TopP         *float64        `json:"top_p,omitempty"`
+	Tools        []ResponseTool  `json:"tools,omitempty"`
+}
+
+type ResponseTool struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 type OAIMessage struct {
@@ -135,15 +154,20 @@ func setupCmd() *cobra.Command {
 func listCmd() *cobra.Command {
 	return &cobra.Command{Use: "list", Aliases: []string{"ls", "models"}, Short: "List OpenCode Go models", Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("OpenCode Go models:")
-		for _, m := range []string{"glm-5.1", "glm-5", "kimi-k2.6", "kimi-k2.5", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "minimax-m2.7", "minimax-m2.5", "deepseek-v4-pro", "deepseek-v4-flash", "qwen3.6-plus", "qwen3.5-plus"} {
+		for _, m := range knownModelIDs() {
 			fmt.Printf("  %s\n", m)
 		}
 	}}
 }
 
+func knownModelIDs() []string {
+	return []string{"glm-5.1", "glm-5", "kimi-k2.6", "kimi-k2.5", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "minimax-m2.7", "minimax-m2.5", "deepseek-v4-pro", "deepseek-v4-flash", "qwen3.6-plus", "qwen3.5-plus"}
+}
+
 func launchCmd() *cobra.Command {
 	var model string
 	var yes bool
+	var codexConfigOnly bool
 	cmd := &cobra.Command{Use: "launch", Short: "Launch tools through ocgo"}
 	claude := &cobra.Command{Use: "claude [-- claude args...]", Short: "Launch Claude Code through OpenCode Go", Args: cobra.ArbitraryArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
@@ -176,7 +200,46 @@ func launchCmd() *cobra.Command {
 	}}
 	claude.Flags().StringVar(&model, "model", "", "OpenCode Go model ID")
 	claude.Flags().BoolVar(&yes, "yes", false, "Allow Claude Code to skip permission prompts")
-	cmd.AddCommand(claude)
+	codex := &cobra.Command{Use: "codex [-- codex args...]", Short: "Launch Codex CLI through OpenCode Go", Args: cobra.ArbitraryArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		base := fmt.Sprintf("http://%s:%d", cfg.Host, cfg.Port)
+		if err := ensureCodexConfig(base); err != nil {
+			return fmt.Errorf("failed to configure codex: %w", err)
+		}
+		if codexConfigOnly {
+			fmt.Printf("Configured Codex profile %q in %s\n", codexProfileName, codexConfigFile())
+			return nil
+		}
+		if err := checkCodexVersion(); err != nil {
+			return err
+		}
+		serverCmd, err := startLaunchServer(base)
+		if err != nil {
+			return err
+		}
+		if serverCmd != nil {
+			defer stopManagedServer(serverCmd)
+		}
+		codexArgs := []string{"--profile", codexProfileName}
+		if model != "" {
+			codexArgs = append(codexArgs, "-m", model)
+		}
+		codexArgs = append(codexArgs, args...)
+		bin, err := exec.LookPath("codex")
+		if err != nil {
+			return fmt.Errorf("codex not found in PATH; install with: npm install -g @openai/codex: %w", err)
+		}
+		c := exec.Command(bin, codexArgs...)
+		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+		c.Env = append(os.Environ(), "OPENAI_API_KEY=ocgo")
+		return c.Run()
+	}}
+	codex.Flags().StringVar(&model, "model", "", "OpenCode Go model ID")
+	codex.Flags().BoolVar(&codexConfigOnly, "config", false, "Configure Codex profile without launching")
+	cmd.AddCommand(claude, codex)
 	return cmd
 }
 
@@ -246,6 +309,8 @@ func runServer(cfg Config) error {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	mux.HandleFunc("/v1/messages/count_tokens", countTokens)
 	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) { proxyMessages(w, r, cfg) })
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { proxyChatCompletions(w, r, cfg) })
+	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) { proxyResponses(w, r, cfg) })
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	fmt.Printf("ocgo proxy listening on http://%s\n", addr)
 	return http.ListenAndServe(addr, mux)
@@ -288,6 +353,79 @@ func proxyMessages(w http.ResponseWriter, r *http.Request, cfg Config) {
 	writeAnthropicResponse(w, resp.Body, or.Model)
 }
 
+func proxyChatCompletions(w http.ResponseWriter, r *http.Request, cfg Config) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, openAIURL, bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	copyHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var rr ResponsesRequest
+	if err := json.NewDecoder(r.Body).Decode(&rr); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	or := responsesToChat(rr)
+	body, _ := json.Marshal(or)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, openAIURL, bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+	if rr.Stream {
+		streamResponses(w, resp.Body, or.Model)
+		return
+	}
+	writeResponsesResponse(w, resp.Body, or.Model)
+}
+
+func copyHeaders(dst, src http.Header) {
+	for k, vals := range src {
+		for _, v := range vals {
+			dst.Add(k, v)
+		}
+	}
+}
+
 func convertRequest(ar AnthropicRequest) OAIRequest {
 	model := ar.Model
 	if model == "" || strings.HasPrefix(model, "claude-") {
@@ -304,6 +442,101 @@ func convertRequest(ar AnthropicRequest) OAIRequest {
 		out.Tools = append(out.Tools, OAITool{Type: "function", Function: OAIFunction{Name: t.Name, Description: t.Description, Parameters: t.InputSchema}})
 	}
 	return out
+}
+
+func responsesToChat(rr ResponsesRequest) OAIRequest {
+	model := rr.Model
+	if model == "" {
+		model = "kimi-k2.6"
+	}
+	out := OAIRequest{Model: model, Stream: rr.Stream, MaxTokens: rr.MaxTokens, Temperature: rr.Temperature, TopP: rr.TopP}
+	if rr.Instructions != "" {
+		out.Messages = append(out.Messages, OAIMessage{Role: "system", Content: rr.Instructions})
+	}
+	out.Messages = append(out.Messages, responsesInputToMessages(rr.Input)...)
+	for _, t := range rr.Tools {
+		if t.Type == "function" || t.Name != "" {
+			out.Tools = append(out.Tools, OAITool{Type: "function", Function: OAIFunction{Name: t.Name, Description: t.Description, Parameters: t.Parameters}})
+		}
+	}
+	return out
+}
+
+func responsesInputToMessages(raw json.RawMessage) []OAIMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return []OAIMessage{{Role: "user", Content: s}}
+	}
+	var items []map[string]json.RawMessage
+	if json.Unmarshal(raw, &items) != nil {
+		return []OAIMessage{{Role: "user", Content: string(raw)}}
+	}
+	var out []OAIMessage
+	var pendingCalls []OAIToolCall
+	for _, item := range items {
+		var typ, role string
+		_ = json.Unmarshal(item["type"], &typ)
+		_ = json.Unmarshal(item["role"], &role)
+		switch typ {
+		case "message", "":
+			if role == "developer" {
+				role = "system"
+			}
+			if role == "" {
+				role = "user"
+			}
+			out = append(out, OAIMessage{Role: role, Content: responsesContentText(item["content"])})
+		case "function_call":
+			var id, callID, name, args string
+			_ = json.Unmarshal(item["id"], &id)
+			_ = json.Unmarshal(item["call_id"], &callID)
+			_ = json.Unmarshal(item["name"], &name)
+			_ = json.Unmarshal(item["arguments"], &args)
+			if id == "" {
+				id = callID
+			}
+			pendingCalls = append(pendingCalls, OAIToolCall{ID: id, Type: "function", Function: OAICallFunction{Name: name, Arguments: args}})
+		case "function_call_output":
+			if len(pendingCalls) > 0 {
+				out = append(out, OAIMessage{Role: "assistant", ToolCalls: pendingCalls})
+				pendingCalls = nil
+			}
+			var callID string
+			_ = json.Unmarshal(item["call_id"], &callID)
+			out = append(out, OAIMessage{Role: "tool", ToolCallID: callID, Content: responsesContentText(item["output"])})
+		}
+	}
+	if len(pendingCalls) > 0 {
+		out = append(out, OAIMessage{Role: "assistant", ToolCalls: pendingCalls})
+	}
+	return out
+}
+
+func responsesContentText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var parts []map[string]json.RawMessage
+	if json.Unmarshal(raw, &parts) != nil {
+		return string(raw)
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		for _, key := range []string{"text", "output_text"} {
+			var v string
+			if json.Unmarshal(p[key], &v) == nil {
+				b.WriteString(v)
+			}
+		}
+	}
+	return b.String()
 }
 
 func contentToOpenAI(m AMessage) []OAIMessage {
@@ -443,6 +676,69 @@ func writeAnthropicResponse(w http.ResponseWriter, body io.Reader, model string)
 	_ = json.NewEncoder(w).Encode(map[string]any{"id": "ocgo", "type": "message", "role": "assistant", "model": model, "content": []map[string]string{{"type": "text", "text": text}}, "stop_reason": "end_turn", "usage": map[string]int{"input_tokens": 0, "output_tokens": 0}})
 }
 
+func streamResponses(w http.ResponseWriter, body io.Reader, model string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	flusher, _ := w.(http.Flusher)
+	id := "resp_ocgo"
+	writeResponseEvent(w, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": id, "object": "response", "model": model, "status": "in_progress", "output": []any{}}})
+	writeResponseEvent(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"id": "msg_ocgo", "type": "message", "role": "assistant", "content": []any{}}})
+	writeResponseEvent(w, "response.content_part.added", map[string]any{"type": "response.content_part.added", "item_id": "msg_ocgo", "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": ""}})
+	if flusher != nil {
+		flusher.Flush()
+	}
+	s := bufio.NewScanner(body)
+	for s.Scan() {
+		line := strings.TrimSpace(s.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "[DONE]" {
+			break
+		}
+		if delta := openAITextDelta([]byte(data)); delta != "" {
+			writeResponseEvent(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "item_id": "msg_ocgo", "output_index": 0, "content_index": 0, "delta": delta})
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}
+	writeResponseEvent(w, "response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": "msg_ocgo", "output_index": 0, "content_index": 0, "text": ""})
+	writeResponseEvent(w, "response.completed", map[string]any{"type": "response.completed", "response": map[string]any{"id": id, "object": "response", "model": model, "status": "completed", "output": []any{}}})
+}
+
+func writeResponseEvent(w io.Writer, event string, payload any) {
+	b, _ := json.Marshal(payload)
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+}
+
+func writeResponsesResponse(w http.ResponseWriter, body io.Reader, model string) {
+	var v struct {
+		Choices []struct {
+			Message struct {
+				Content   string        `json:"content"`
+				ToolCalls []OAIToolCall `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	_ = json.NewDecoder(body).Decode(&v)
+	text := ""
+	var output []any
+	if len(v.Choices) > 0 {
+		text = v.Choices[0].Message.Content
+		if len(v.Choices[0].Message.ToolCalls) > 0 {
+			for _, call := range v.Choices[0].Message.ToolCalls {
+				output = append(output, map[string]any{"id": call.ID, "type": "function_call", "call_id": call.ID, "name": call.Function.Name, "arguments": call.Function.Arguments})
+			}
+		}
+	}
+	if len(output) == 0 {
+		output = append(output, map[string]any{"id": "msg_ocgo", "type": "message", "role": "assistant", "content": []map[string]string{{"type": "output_text", "text": text}}})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_ocgo", "object": "response", "created_at": time.Now().Unix(), "model": model, "status": "completed", "output": output, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}})
+}
+
 func countTokens(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": 0})
 }
@@ -538,6 +834,155 @@ func startServerProcess(detached bool) (*exec.Cmd, error) {
 func configDir() string  { home, _ := os.UserHomeDir(); return filepath.Join(home, ".config", "ocgo") }
 func configFile() string { return filepath.Join(configDir(), "config.json") }
 func pidFile() string    { return filepath.Join(configDir(), "ocgo.pid") }
+
+func codexConfigFile() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".codex", "config.toml")
+}
+
+func codexModelCatalogFile() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".codex", "ocgo-models.json")
+}
+
+func ensureCodexConfig(base string) error {
+	path := codexConfigFile()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	if err := writeCodexModelCatalog(codexModelCatalogFile()); err != nil {
+		return err
+	}
+	return writeCodexProfile(path, strings.TrimRight(base, "/")+"/v1/")
+}
+
+func writeCodexProfile(path, baseURL string) error {
+	catalogPath := codexModelCatalogFile()
+	sections := []struct {
+		header string
+		lines  []string
+	}{
+		{fmt.Sprintf("[profiles.%s]", codexProfileName), []string{fmt.Sprintf("openai_base_url = %q", baseURL), `forced_login_method = "api"`, fmt.Sprintf("model_provider = %q", codexProfileName), fmt.Sprintf("model_catalog_json = %q", catalogPath)}},
+		{fmt.Sprintf("[model_providers.%s]", codexProfileName), []string{`name = "OpenCode Go"`, fmt.Sprintf("base_url = %q", baseURL), `wire_api = "responses"`}},
+	}
+	b, err := os.ReadFile(path)
+	text := ""
+	if err == nil {
+		text = string(b)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, s := range sections {
+		block := strings.Join(append([]string{s.header}, s.lines...), "\n") + "\n"
+		if idx := strings.Index(text, s.header); idx >= 0 {
+			rest := text[idx+len(s.header):]
+			if endIdx := strings.Index(rest, "\n["); endIdx >= 0 {
+				text = text[:idx] + block + rest[endIdx+1:]
+			} else {
+				text = text[:idx] + block
+			}
+		} else {
+			if text != "" && !strings.HasSuffix(text, "\n") {
+				text += "\n"
+			}
+			if text != "" {
+				text += "\n"
+			}
+			text += block
+		}
+	}
+	return os.WriteFile(path, []byte(text), 0644)
+}
+
+func writeCodexModelCatalog(path string) error {
+	models := make([]map[string]any, 0, len(knownModelIDs()))
+	for i, id := range knownModelIDs() {
+		models = append(models, map[string]any{
+			"slug":                             id,
+			"display_name":                     id,
+			"description":                      "OpenCode Go model",
+			"default_reasoning_level":          nil,
+			"supported_reasoning_levels":       []any{},
+			"shell_type":                       "shell_command",
+			"visibility":                       "list",
+			"supported_in_api":                 true,
+			"priority":                         i,
+			"availability_nux":                 nil,
+			"upgrade":                          nil,
+			"base_instructions":                "You are Codex, a coding agent running in a terminal-based coding assistant.",
+			"supports_reasoning_summaries":     false,
+			"default_reasoning_summary":        "none",
+			"support_verbosity":                false,
+			"default_verbosity":                nil,
+			"apply_patch_tool_type":            nil,
+			"web_search_tool_type":             "text",
+			"truncation_policy":                map[string]any{"mode": "tokens", "limit": 10000},
+			"supports_parallel_tool_calls":     false,
+			"supports_image_detail_original":   false,
+			"context_window":                   128000,
+			"max_context_window":               128000,
+			"auto_compact_token_limit":         nil,
+			"effective_context_window_percent": 95,
+			"experimental_supported_tools":     []any{},
+			"input_modalities":                 []string{"text"},
+			"supports_search_tool":             false,
+		})
+	}
+	b, err := json.MarshalIndent(map[string]any{"models": models}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(b, '\n'), 0644)
+}
+
+func checkCodexVersion() error {
+	if _, err := exec.LookPath("codex"); err != nil {
+		return fmt.Errorf("codex is not installed, install with: npm install -g @openai/codex")
+	}
+	out, err := exec.Command("codex", "--version").Output()
+	if err != nil {
+		return fmt.Errorf("failed to get codex version: %w", err)
+	}
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) == 0 {
+		return fmt.Errorf("unexpected codex version output: %s", string(out))
+	}
+	version := fields[len(fields)-1]
+	if compareVersions(version, "0.81.0") < 0 {
+		return fmt.Errorf("codex version %s is too old, minimum required is 0.81.0; update with: npm update -g @openai/codex", version)
+	}
+	return nil
+}
+
+func compareVersions(a, b string) int {
+	ap, bp := versionParts(a), versionParts(b)
+	for i := 0; i < 3; i++ {
+		if ap[i] > bp[i] {
+			return 1
+		}
+		if ap[i] < bp[i] {
+			return -1
+		}
+	}
+	return 0
+}
+
+func versionParts(v string) [3]int {
+	v = strings.TrimPrefix(v, "v")
+	fields := strings.Split(v, ".")
+	var out [3]int
+	for i := 0; i < len(fields) && i < 3; i++ {
+		part := fields[i]
+		for j, r := range part {
+			if r < '0' || r > '9' {
+				part = part[:j]
+				break
+			}
+		}
+		out[i], _ = strconv.Atoi(part)
+	}
+	return out
+}
 
 func saveConfig(cfg Config) error {
 	if err := os.MkdirAll(configDir(), 0755); err != nil {
