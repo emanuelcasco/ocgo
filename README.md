@@ -226,10 +226,10 @@ gh auth login
 Release a new version:
 
 ```bash
-HOMEBREW_TAP_REPO=YOUR_GITHUB_USER/homebrew-tap make release TAG=v0.1.0
+make release TAG=v0.1.0
 ```
 
-Optionally set `GITHUB_REPOSITORY=owner/repo` if the script cannot infer it from `origin`.
+By default, releases are published to `emanuelcasco/ocgo` and the Homebrew formula is pushed to `emanuelcasco/homebrew-tap`. You can override those with `GITHUB_REPOSITORY=owner/repo` and `HOMEBREW_TAP_REPO=owner/homebrew-tap`.
 
 The script builds macOS/Linux `amd64` and `arm64` archives, uploads them to GitHub Releases, and commits `Formula/ocgo.rb` to the tap repo.
 

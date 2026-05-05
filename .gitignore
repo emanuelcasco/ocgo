@@ -1,0 +1,7 @@
+bin/
+dist/
+*.exe
+*.pid
+.env
+.tmp/
+oc-go-cc
