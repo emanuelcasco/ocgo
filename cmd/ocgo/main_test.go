@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,8 @@ func TestWriteCodexProfile(t *testing.T) {
 		`forced_login_method = "api"`,
 		`model_provider = "ocgo-launch"`,
 		`model_catalog_json = `,
+		`model_reasoning_effort = "minimal"`,
+		`model_reasoning_summary = "none"`,
 		"[model_providers.ocgo-launch]",
 		`name = "OpenCode Go"`,
 		`base_url = "http://127.0.0.1:3456/v1/"`,
@@ -98,5 +101,82 @@ func TestResponsesInputToMessages(t *testing.T) {
 	}
 	if messages[1].Role != "user" || messages[1].Content != "hello" {
 		t.Fatalf("bad user conversion: %+v", messages[1])
+	}
+}
+
+func TestResponsesInputFunctionCallUsesCallID(t *testing.T) {
+	messages := responsesInputToMessages([]byte(`[{"type":"function_call","id":"fc_123","call_id":"call_123","name":"shell","arguments":"{\"cmd\":\"pwd\"}"},{"type":"function_call_output","call_id":"call_123","output":"/tmp"}]`))
+	if len(messages) != 2 {
+		t.Fatalf("got %d messages", len(messages))
+	}
+	if messages[0].ToolCalls[0].ID != "call_123" {
+		t.Fatalf("tool call ID should match call_id for follow-up tool output: %+v", messages[0].ToolCalls[0])
+	}
+	if messages[1].ToolCallID != "call_123" {
+		t.Fatalf("bad tool output ID: %+v", messages[1])
+	}
+}
+
+func TestStreamAnthropicForwardsToolCalls(t *testing.T) {
+	reasoningContentCache.Lock()
+	reasoningContentCache.byCallID = map[string]string{}
+	reasoningContentCache.Unlock()
+	body := strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning_content":"Need pwd.","tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"Bash","arguments":"{\"command\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"pwd\"}"}}]}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n"))
+	w := httptest.NewRecorder()
+	streamAnthropic(w, body, "deepseek-v4-flash")
+	out := w.Body.String()
+	for _, want := range []string{
+		`"type":"tool_use"`,
+		`"name":"Bash"`,
+		`"type":"input_json_delta"`,
+		`"partial_json":"{\"command\":"`,
+		`"stop_reason":"tool_use"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	messages := responsesInputToMessages([]byte(`[{"type":"function_call","call_id":"call_abc","name":"Bash","arguments":"{\"command\":\"pwd\"}"},{"type":"function_call_output","call_id":"call_abc","output":"/tmp"}]`))
+	if messages[0].ReasoningContent != "Need pwd." {
+		t.Fatalf("missing cached reasoning content: %+v", messages[0])
+	}
+}
+
+func TestStreamResponsesForwardsToolCalls(t *testing.T) {
+	reasoningContentCache.Lock()
+	reasoningContentCache.byCallID = map[string]string{}
+	reasoningContentCache.Unlock()
+	body := strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning_content":"I should call the tool.","tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"shell","arguments":"{\"cmd\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"pwd\"}"}}]}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n"))
+	w := httptest.NewRecorder()
+	streamResponses(w, body, "deepseek-v4-flash")
+	out := w.Body.String()
+	for _, want := range []string{
+		"event: response.output_item.added",
+		`"type":"function_call"`,
+		"event: response.function_call_arguments.delta",
+		"event: response.function_call_arguments.done",
+		`"arguments":"{\"cmd\":\"pwd\"}"`,
+		"event: response.completed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "response.output_text.delta") {
+		t.Fatalf("tool-only stream should not emit text deltas:\n%s", out)
+	}
+	messages := responsesInputToMessages([]byte(`[{"type":"function_call","call_id":"call_abc","name":"shell","arguments":"{\"cmd\":\"pwd\"}"},{"type":"function_call_output","call_id":"call_abc","output":"/tmp"}]`))
+	if messages[0].ReasoningContent != "I should call the tool." {
+		t.Fatalf("missing cached reasoning content: %+v", messages[0])
 	}
 }

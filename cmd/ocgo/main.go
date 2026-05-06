@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -87,10 +88,11 @@ type ResponseTool struct {
 }
 
 type OAIMessage struct {
-	Role       string        `json:"role"`
-	Content    string        `json:"content,omitempty"`
-	ToolCalls  []OAIToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string        `json:"tool_call_id,omitempty"`
+	Role             string        `json:"role"`
+	Content          string        `json:"content,omitempty"`
+	ToolCalls        []OAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string        `json:"tool_call_id,omitempty"`
+	ReasoningContent string        `json:"reasoning_content,omitempty"`
 }
 
 type OAITool struct {
@@ -114,6 +116,11 @@ type OAICallFunction struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
 }
+
+var reasoningContentCache = struct {
+	sync.Mutex
+	byCallID map[string]string
+}{byCallID: map[string]string{}}
 
 func main() {
 	root := &cobra.Command{Use: appName, Short: "Run Claude Code with OpenCode Go", Version: version}
@@ -495,13 +502,13 @@ func responsesInputToMessages(raw json.RawMessage) []OAIMessage {
 			_ = json.Unmarshal(item["call_id"], &callID)
 			_ = json.Unmarshal(item["name"], &name)
 			_ = json.Unmarshal(item["arguments"], &args)
-			if id == "" {
-				id = callID
+			if callID == "" {
+				callID = id
 			}
-			pendingCalls = append(pendingCalls, OAIToolCall{ID: id, Type: "function", Function: OAICallFunction{Name: name, Arguments: args}})
+			pendingCalls = append(pendingCalls, OAIToolCall{ID: callID, Type: "function", Function: OAICallFunction{Name: name, Arguments: args}})
 		case "function_call_output":
 			if len(pendingCalls) > 0 {
-				out = append(out, OAIMessage{Role: "assistant", ToolCalls: pendingCalls})
+				out = append(out, assistantToolCallsMessage(pendingCalls))
 				pendingCalls = nil
 			}
 			var callID string
@@ -510,9 +517,37 @@ func responsesInputToMessages(raw json.RawMessage) []OAIMessage {
 		}
 	}
 	if len(pendingCalls) > 0 {
-		out = append(out, OAIMessage{Role: "assistant", ToolCalls: pendingCalls})
+		out = append(out, assistantToolCallsMessage(pendingCalls))
 	}
 	return out
+}
+
+func assistantToolCallsMessage(calls []OAIToolCall) OAIMessage {
+	return OAIMessage{Role: "assistant", ToolCalls: calls, ReasoningContent: cachedReasoningContent(calls)}
+}
+
+func cachedReasoningContent(calls []OAIToolCall) string {
+	reasoningContentCache.Lock()
+	defer reasoningContentCache.Unlock()
+	for _, call := range calls {
+		if reasoning := reasoningContentCache.byCallID[call.ID]; reasoning != "" {
+			return reasoning
+		}
+	}
+	return ""
+}
+
+func cacheReasoningContent(calls []OAIToolCall, reasoning string) {
+	if reasoning == "" || len(calls) == 0 {
+		return
+	}
+	reasoningContentCache.Lock()
+	defer reasoningContentCache.Unlock()
+	for _, call := range calls {
+		if call.ID != "" {
+			reasoningContentCache.byCallID[call.ID] = reasoning
+		}
+	}
 }
 
 func responsesContentText(raw json.RawMessage) string {
@@ -575,7 +610,9 @@ func contentToOpenAI(m AMessage) []OAIMessage {
 		}
 	}
 	if len(calls) > 0 {
-		return []OAIMessage{{Role: "assistant", Content: text.String(), ToolCalls: calls}}
+		msg := assistantToolCallsMessage(calls)
+		msg.Content = text.String()
+		return []OAIMessage{msg}
 	}
 	if len(toolMsgs) > 0 {
 		return toolMsgs
@@ -617,10 +654,15 @@ func streamAnthropic(w http.ResponseWriter, body io.Reader, model string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	flusher, _ := w.(http.Flusher)
 	fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"ocgo\",\"type\":\"message\",\"role\":\"assistant\",\"model\":%q,\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n", model)
-	fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
 	if flusher != nil {
 		flusher.Flush()
 	}
+	textStarted := false
+	textIndex := -1
+	nextIndex := 0
+	toolIndexes := map[int]int{}
+	var tools []streamedResponseToolCall
+	var reasoning strings.Builder
 	s := bufio.NewScanner(body)
 	for s.Scan() {
 		line := strings.TrimSpace(s.Text())
@@ -631,16 +673,71 @@ func streamAnthropic(w http.ResponseWriter, body io.Reader, model string) {
 		if data == "[DONE]" {
 			break
 		}
-		if delta := openAITextDelta([]byte(data)); delta != "" {
-			b, _ := json.Marshal(delta)
-			fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":%s}}\n\n", b)
+		chunk := parseOpenAIStreamChunk([]byte(data))
+		if chunk.ReasoningContent != "" {
+			reasoning.WriteString(chunk.ReasoningContent)
+		}
+		if chunk.Content != "" {
+			if !textStarted {
+				textStarted = true
+				textIndex = nextIndex
+				nextIndex++
+				fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n", textIndex)
+			}
+			b, _ := json.Marshal(chunk.Content)
+			fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"text_delta\",\"text\":%s}}\n\n", textIndex, b)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		for _, tc := range chunk.ToolCalls {
+			toolPos, ok := toolIndexes[tc.Index]
+			if !ok {
+				callID := tc.ID
+				if callID == "" {
+					callID = fmt.Sprintf("call_%d", tc.Index)
+				}
+				toolPos = len(tools)
+				toolIndexes[tc.Index] = toolPos
+				blockIndex := nextIndex
+				nextIndex++
+				tools = append(tools, streamedResponseToolCall{OutputIndex: blockIndex, Call: OAIToolCall{ID: callID, Type: "function", Function: OAICallFunction{Name: tc.Name}}})
+				idJSON, _ := json.Marshal(callID)
+				nameJSON, _ := json.Marshal(tc.Name)
+				fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"tool_use\",\"id\":%s,\"name\":%s,\"input\":{}}}\n\n", blockIndex, idJSON, nameJSON)
+			}
+			if tc.ID != "" {
+				tools[toolPos].Call.ID = tc.ID
+			}
+			if tc.Name != "" {
+				tools[toolPos].Call.Function.Name = tc.Name
+			}
+			if tc.Arguments != "" {
+				tools[toolPos].Call.Function.Arguments += tc.Arguments
+				b, _ := json.Marshal(tc.Arguments)
+				fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":%s}}\n\n", tools[toolPos].OutputIndex, b)
+			}
 			if flusher != nil {
 				flusher.Flush()
 			}
 		}
 	}
-	fmt.Fprint(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
-	fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":0}}\n\n")
+	var calls []OAIToolCall
+	for _, tool := range tools {
+		calls = append(calls, tool.Call)
+	}
+	cacheReasoningContent(calls, reasoning.String())
+	if textStarted {
+		fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", textIndex)
+	}
+	for _, tool := range tools {
+		fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", tool.OutputIndex)
+	}
+	stopReason := "end_turn"
+	if len(tools) > 0 {
+		stopReason = "tool_use"
+	}
+	fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":%q,\"stop_sequence\":null},\"usage\":{\"output_tokens\":0}}\n\n", stopReason)
 	fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 }
 
@@ -681,11 +778,17 @@ func streamResponses(w http.ResponseWriter, body io.Reader, model string) {
 	flusher, _ := w.(http.Flusher)
 	id := "resp_ocgo"
 	writeResponseEvent(w, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": id, "object": "response", "model": model, "status": "in_progress", "output": []any{}}})
-	writeResponseEvent(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"id": "msg_ocgo", "type": "message", "role": "assistant", "content": []any{}}})
-	writeResponseEvent(w, "response.content_part.added", map[string]any{"type": "response.content_part.added", "item_id": "msg_ocgo", "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": ""}})
 	if flusher != nil {
 		flusher.Flush()
 	}
+	messageStarted := false
+	messageDone := false
+	messageOutputIndex := -1
+	nextOutputIndex := 0
+	var text strings.Builder
+	var reasoning strings.Builder
+	toolIndexes := map[int]int{}
+	var tools []streamedResponseToolCall
 	s := bufio.NewScanner(body)
 	for s.Scan() {
 		line := strings.TrimSpace(s.Text())
@@ -696,15 +799,122 @@ func streamResponses(w http.ResponseWriter, body io.Reader, model string) {
 		if data == "[DONE]" {
 			break
 		}
-		if delta := openAITextDelta([]byte(data)); delta != "" {
-			writeResponseEvent(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "item_id": "msg_ocgo", "output_index": 0, "content_index": 0, "delta": delta})
+		chunk := parseOpenAIStreamChunk([]byte(data))
+		if chunk.ReasoningContent != "" {
+			reasoning.WriteString(chunk.ReasoningContent)
+		}
+		if chunk.Content != "" {
+			if !messageStarted {
+				messageStarted = true
+				messageOutputIndex = nextOutputIndex
+				nextOutputIndex++
+				writeResponseEvent(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": messageOutputIndex, "item": map[string]any{"id": "msg_ocgo", "type": "message", "role": "assistant", "content": []any{}}})
+				writeResponseEvent(w, "response.content_part.added", map[string]any{"type": "response.content_part.added", "item_id": "msg_ocgo", "output_index": messageOutputIndex, "content_index": 0, "part": map[string]any{"type": "output_text", "text": ""}})
+			}
+			text.WriteString(chunk.Content)
+			writeResponseEvent(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "item_id": "msg_ocgo", "output_index": messageOutputIndex, "content_index": 0, "delta": chunk.Content})
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		for _, tc := range chunk.ToolCalls {
+			toolPos, ok := toolIndexes[tc.Index]
+			if !ok {
+				callID := tc.ID
+				if callID == "" {
+					callID = fmt.Sprintf("call_%d", tc.Index)
+				}
+				toolPos = len(tools)
+				toolIndexes[tc.Index] = toolPos
+				outputIndex := nextOutputIndex
+				nextOutputIndex++
+				tools = append(tools, streamedResponseToolCall{OutputIndex: outputIndex, Call: OAIToolCall{ID: callID, Type: "function", Function: OAICallFunction{Name: tc.Name}}})
+				writeResponseEvent(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": outputIndex, "item": map[string]any{"id": callID, "type": "function_call", "call_id": callID, "name": tc.Name, "arguments": ""}})
+			}
+			if tc.ID != "" {
+				tools[toolPos].Call.ID = tc.ID
+			}
+			if tc.Name != "" {
+				tools[toolPos].Call.Function.Name = tc.Name
+			}
+			if tc.Arguments != "" {
+				tools[toolPos].Call.Function.Arguments += tc.Arguments
+				writeResponseEvent(w, "response.function_call_arguments.delta", map[string]any{"type": "response.function_call_arguments.delta", "item_id": tools[toolPos].Call.ID, "output_index": tools[toolPos].OutputIndex, "delta": tc.Arguments})
+			}
 			if flusher != nil {
 				flusher.Flush()
 			}
 		}
 	}
-	writeResponseEvent(w, "response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": "msg_ocgo", "output_index": 0, "content_index": 0, "text": ""})
-	writeResponseEvent(w, "response.completed", map[string]any{"type": "response.completed", "response": map[string]any{"id": id, "object": "response", "model": model, "status": "completed", "output": []any{}}})
+	var toolCalls []OAIToolCall
+	for _, tool := range tools {
+		toolCalls = append(toolCalls, tool.Call)
+	}
+	cacheReasoningContent(toolCalls, reasoning.String())
+	if messageStarted && !messageDone {
+		messageDone = true
+		writeResponseEvent(w, "response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": "msg_ocgo", "output_index": messageOutputIndex, "content_index": 0, "text": text.String()})
+		writeResponseEvent(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": messageOutputIndex, "item": map[string]any{"id": "msg_ocgo", "type": "message", "role": "assistant", "content": []map[string]string{{"type": "output_text", "text": text.String()}}}})
+	}
+	var output []any
+	if messageStarted {
+		output = append(output, map[string]any{"id": "msg_ocgo", "type": "message", "role": "assistant", "content": []map[string]string{{"type": "output_text", "text": text.String()}}})
+	}
+	for _, tool := range tools {
+		call := tool.Call
+		item := map[string]any{"id": call.ID, "type": "function_call", "call_id": call.ID, "name": call.Function.Name, "arguments": call.Function.Arguments}
+		writeResponseEvent(w, "response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "item_id": call.ID, "output_index": tool.OutputIndex, "arguments": call.Function.Arguments})
+		writeResponseEvent(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": tool.OutputIndex, "item": item})
+		output = append(output, item)
+	}
+	writeResponseEvent(w, "response.completed", map[string]any{"type": "response.completed", "response": map[string]any{"id": id, "object": "response", "model": model, "status": "completed", "output": output}})
+}
+
+type streamedResponseToolCall struct {
+	OutputIndex int
+	Call        OAIToolCall
+}
+
+type openAIStreamToolCall struct {
+	Index     int
+	ID        string
+	Name      string
+	Arguments string
+}
+
+type openAIStreamChunk struct {
+	Content          string
+	ReasoningContent string
+	ToolCalls        []openAIStreamToolCall
+}
+
+func parseOpenAIStreamChunk(data []byte) openAIStreamChunk {
+	var v struct {
+		Choices []struct {
+			Delta struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+				ToolCalls        []struct {
+					Index    int    `json:"index"`
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	_ = json.Unmarshal(data, &v)
+	if len(v.Choices) == 0 {
+		return openAIStreamChunk{}
+	}
+	delta := v.Choices[0].Delta
+	out := openAIStreamChunk{Content: delta.Content, ReasoningContent: delta.ReasoningContent}
+	for _, tc := range delta.ToolCalls {
+		out.ToolCalls = append(out.ToolCalls, openAIStreamToolCall{Index: tc.Index, ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+	}
+	return out
 }
 
 func writeResponseEvent(w io.Writer, event string, payload any) {
@@ -716,8 +926,9 @@ func writeResponsesResponse(w http.ResponseWriter, body io.Reader, model string)
 	var v struct {
 		Choices []struct {
 			Message struct {
-				Content   string        `json:"content"`
-				ToolCalls []OAIToolCall `json:"tool_calls"`
+				Content          string        `json:"content"`
+				ReasoningContent string        `json:"reasoning_content"`
+				ToolCalls        []OAIToolCall `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
@@ -727,6 +938,7 @@ func writeResponsesResponse(w http.ResponseWriter, body io.Reader, model string)
 	if len(v.Choices) > 0 {
 		text = v.Choices[0].Message.Content
 		if len(v.Choices[0].Message.ToolCalls) > 0 {
+			cacheReasoningContent(v.Choices[0].Message.ToolCalls, v.Choices[0].Message.ReasoningContent)
 			for _, call := range v.Choices[0].Message.ToolCalls {
 				output = append(output, map[string]any{"id": call.ID, "type": "function_call", "call_id": call.ID, "name": call.Function.Name, "arguments": call.Function.Arguments})
 			}
@@ -862,7 +1074,7 @@ func writeCodexProfile(path, baseURL string) error {
 		header string
 		lines  []string
 	}{
-		{fmt.Sprintf("[profiles.%s]", codexProfileName), []string{fmt.Sprintf("openai_base_url = %q", baseURL), `forced_login_method = "api"`, fmt.Sprintf("model_provider = %q", codexProfileName), fmt.Sprintf("model_catalog_json = %q", catalogPath)}},
+		{fmt.Sprintf("[profiles.%s]", codexProfileName), []string{fmt.Sprintf("openai_base_url = %q", baseURL), `forced_login_method = "api"`, fmt.Sprintf("model_provider = %q", codexProfileName), fmt.Sprintf("model_catalog_json = %q", catalogPath), `model_reasoning_effort = "minimal"`, `model_reasoning_summary = "none"`}},
 		{fmt.Sprintf("[model_providers.%s]", codexProfileName), []string{`name = "OpenCode Go"`, fmt.Sprintf("base_url = %q", baseURL), `wire_api = "responses"`}},
 	}
 	b, err := os.ReadFile(path)
