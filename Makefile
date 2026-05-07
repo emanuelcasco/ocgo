@@ -18,14 +18,8 @@ clean:
 	rm -rf bin
 
 install: build
-<<<<<<< Updated upstream
-	install -m 0755 bin/ocgo $(HOME)/go/bin/ocgo
-||||||| Stash base
-	install -m 0755 bin/ocgo $$(go env GOBIN)/ocgo
-=======
 	mkdir -p "$(INSTALL_DIR)"
 	install -m 0755 bin/ocgo "$(INSTALL_DIR)/ocgo"
->>>>>>> Stashed changes
 
 release:
 	@[ -n "$(TAG)" ] || (echo "Usage: make release TAG=v0.1.0" && exit 1)
