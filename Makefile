@@ -15,7 +15,7 @@ clean:
 	rm -rf bin
 
 install: build
-	install -m 0755 bin/ocgo $(HOME)/go/bin/ocgo
+	install -m 0755 bin/ocgo $$(go env GOBIN)/ocgo
 
 release:
 	@[ -n "$(TAG)" ] || (echo "Usage: make release TAG=v0.1.0" && exit 1)
