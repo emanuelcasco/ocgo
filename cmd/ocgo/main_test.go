@@ -112,8 +112,37 @@ func TestResponsesInputFunctionCallUsesCallID(t *testing.T) {
 	if messages[0].ToolCalls[0].ID != "call_123" {
 		t.Fatalf("tool call ID should match call_id for follow-up tool output: %+v", messages[0].ToolCalls[0])
 	}
+	if messages[0].ReasoningContent == "" {
+		t.Fatalf("assistant tool call history should include fallback reasoning_content: %+v", messages[0])
+	}
 	if messages[1].ToolCallID != "call_123" {
 		t.Fatalf("bad tool output ID: %+v", messages[1])
+	}
+}
+
+func TestAnthropicToolUseHistoryIncludesFallbackReasoning(t *testing.T) {
+	messages := contentToOpenAI(AMessage{Role: "assistant", Content: []byte(`[{"type":"tool_use","id":"call_123","name":"Bash","input":{"command":"pwd"}}]`)})
+	if len(messages) != 1 {
+		t.Fatalf("got %d messages", len(messages))
+	}
+	if messages[0].Role != "assistant" || len(messages[0].ToolCalls) != 1 {
+		t.Fatalf("bad tool call conversion: %+v", messages[0])
+	}
+	if messages[0].ReasoningContent == "" {
+		t.Fatalf("assistant tool call history should include fallback reasoning_content: %+v", messages[0])
+	}
+}
+
+func TestAnthropicToolResultPreservesFollowingUserText(t *testing.T) {
+	messages := contentToOpenAI(AMessage{Role: "user", Content: []byte(`[{"type":"tool_result","tool_use_id":"call_123","content":"09:33:16"},{"type":"text","text":"https://figma.example/design what's going on here?"}]`)})
+	if len(messages) != 2 {
+		t.Fatalf("got %d messages: %+v", len(messages), messages)
+	}
+	if messages[0].Role != "tool" || messages[0].ToolCallID != "call_123" || messages[0].Content != "09:33:16" {
+		t.Fatalf("bad tool result conversion: %+v", messages[0])
+	}
+	if messages[1].Role != "user" || !strings.Contains(messages[1].Content, "figma.example") {
+		t.Fatalf("following user text was not preserved: %+v", messages[1])
 	}
 }
 

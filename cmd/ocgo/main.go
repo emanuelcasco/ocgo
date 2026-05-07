@@ -534,6 +534,13 @@ func cachedReasoningContent(calls []OAIToolCall) string {
 			return reasoning
 		}
 	}
+	if len(calls) > 0 {
+		// Moonshot/Kimi rejects follow-up assistant tool-call messages when
+		// thinking is enabled unless reasoning_content is present. Some
+		// OpenAI-compatible streams omit reasoning_content on the initial tool
+		// call, so provide a minimal placeholder for replayed tool-call history.
+		return "Tool call requested."
+	}
 	return ""
 }
 
@@ -615,7 +622,14 @@ func contentToOpenAI(m AMessage) []OAIMessage {
 		return []OAIMessage{msg}
 	}
 	if len(toolMsgs) > 0 {
-		return toolMsgs
+		out := append([]OAIMessage{}, toolMsgs...)
+		if userText := strings.TrimSpace(text.String()); userText != "" {
+			// Anthropic can send a user's next text in the same content array as
+			// tool_result blocks. Preserve that text as the next user message;
+			// dropping it makes the model answer the previous tool result again.
+			out = append(out, OAIMessage{Role: m.Role, Content: userText})
+		}
+		return out
 	}
 	return []OAIMessage{{Role: m.Role, Content: text.String()}}
 }
