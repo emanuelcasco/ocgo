@@ -89,10 +89,21 @@ type ResponseTool struct {
 
 type OAIMessage struct {
 	Role             string        `json:"role"`
-	Content          string        `json:"content,omitempty"`
+	Content          any           `json:"content,omitempty"`
 	ToolCalls        []OAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string        `json:"tool_call_id,omitempty"`
 	ReasoningContent string        `json:"reasoning_content,omitempty"`
+}
+
+type OAIContentPart struct {
+	Type     string       `json:"type"`
+	Text     string       `json:"text,omitempty"`
+	ImageURL *OAIImageURL `json:"image_url,omitempty"`
+}
+
+type OAIImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
 }
 
 type OAITool struct {
@@ -169,6 +180,22 @@ func listCmd() *cobra.Command {
 
 func knownModelIDs() []string {
 	return []string{"glm-5.1", "glm-5", "kimi-k2.6", "kimi-k2.5", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "minimax-m2.7", "minimax-m2.5", "deepseek-v4-pro", "deepseek-v4-flash", "qwen3.6-plus", "qwen3.5-plus"}
+}
+
+func modelSupportsImages(model string) bool {
+	switch model {
+	case "kimi-k2.6", "kimi-k2.5", "mimo-v2-omni":
+		return true
+	default:
+		return false
+	}
+}
+
+func modelInputModalities(model string) []string {
+	if modelSupportsImages(model) {
+		return []string{"text", "image"}
+	}
+	return []string{"text"}
 }
 
 func launchCmd() *cobra.Command {
@@ -334,6 +361,10 @@ func proxyMessages(w http.ResponseWriter, r *http.Request, cfg Config) {
 		return
 	}
 	or := convertRequest(ar)
+	if err := validateImageSupport(or); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	body, _ := json.Marshal(or)
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, openAIURL, bytes.NewReader(body))
 	if err != nil {
@@ -370,6 +401,11 @@ func proxyChatCompletions(w http.ResponseWriter, r *http.Request, cfg Config) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	body, err = prepareChatBody(body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, openAIURL, bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -399,6 +435,10 @@ func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
 		return
 	}
 	or := responsesToChat(rr)
+	if err := validateImageSupport(or); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	body, _ := json.Marshal(or)
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, openAIURL, bytes.NewReader(body))
 	if err != nil {
@@ -431,6 +471,88 @@ func copyHeaders(dst, src http.Header) {
 			dst.Add(k, v)
 		}
 	}
+}
+
+func prepareChatBody(body []byte) ([]byte, error) {
+	var req map[string]any
+	if json.Unmarshal(body, &req) != nil {
+		return body, nil
+	}
+	model, _ := req["model"].(string)
+	if !rawChatBodyHasImages(req) {
+		return body, nil
+	}
+	if !modelSupportsImages(model) {
+		return nil, unsupportedImageModelError(model)
+	}
+	changed := stripRawChatImageDetails(req)
+	if !changed {
+		return body, nil
+	}
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body, nil
+	}
+	return out, nil
+}
+
+func rawChatBodyHasImages(req map[string]any) bool {
+	messages, _ := req["messages"].([]any)
+	for _, item := range messages {
+		msg, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if contentHasImage(msg["content"]) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateImageSupport(or OAIRequest) error {
+	if requestHasImages(or) && !modelSupportsImages(or.Model) {
+		return unsupportedImageModelError(or.Model)
+	}
+	return nil
+}
+
+func unsupportedImageModelError(model string) error {
+	if model == "" {
+		model = "unknown"
+	}
+	return fmt.Errorf("model %s does not support image inputs", model)
+}
+
+func stripRawChatImageDetails(req map[string]any) bool {
+	changed := false
+	messages, _ := req["messages"].([]any)
+	for _, item := range messages {
+		msg, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		parts, _ := msg["content"].([]any)
+		for _, part := range parts {
+			p, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, ok := p["detail"]; ok {
+				delete(p, "detail")
+				changed = true
+			}
+			image, ok := p["image_url"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, ok := image["detail"]; ok {
+				delete(image, "detail")
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 func convertRequest(ar AnthropicRequest) OAIRequest {
@@ -469,6 +591,37 @@ func responsesToChat(rr ResponsesRequest) OAIRequest {
 	return out
 }
 
+func requestHasImages(or OAIRequest) bool {
+	for _, m := range or.Messages {
+		if contentHasImage(m.Content) {
+			return true
+		}
+	}
+	return false
+}
+
+func contentHasImage(content any) bool {
+	switch v := content.(type) {
+	case []OAIContentPart:
+		for _, part := range v {
+			if part.Type == "image_url" && part.ImageURL != nil && part.ImageURL.URL != "" {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if typ, _ := m["type"].(string); typ == "image_url" || typ == "input_image" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func responsesInputToMessages(raw json.RawMessage) []OAIMessage {
 	if len(raw) == 0 {
 		return nil
@@ -495,7 +648,7 @@ func responsesInputToMessages(raw json.RawMessage) []OAIMessage {
 			if role == "" {
 				role = "user"
 			}
-			out = append(out, OAIMessage{Role: role, Content: responsesContentText(item["content"])})
+			out = append(out, OAIMessage{Role: role, Content: responsesContent(item["content"])})
 		case "function_call":
 			var id, callID, name, args string
 			_ = json.Unmarshal(item["id"], &id)
@@ -557,6 +710,66 @@ func cacheReasoningContent(calls []OAIToolCall, reasoning string) {
 	}
 }
 
+func responsesContent(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var parts []map[string]json.RawMessage
+	if json.Unmarshal(raw, &parts) != nil {
+		return string(raw)
+	}
+	var text strings.Builder
+	var out []OAIContentPart
+	hasImage := false
+	for _, p := range parts {
+		var typ string
+		_ = json.Unmarshal(p["type"], &typ)
+		switch typ {
+		case "input_text", "output_text", "text":
+			for _, key := range []string{"text", "output_text"} {
+				var v string
+				if json.Unmarshal(p[key], &v) == nil {
+					text.WriteString(v)
+					out = append(out, OAIContentPart{Type: "text", Text: v})
+					break
+				}
+			}
+		case "input_image", "image_url":
+			if image := responsesImageURL(p); image != nil {
+				hasImage = true
+				out = append(out, OAIContentPart{Type: "image_url", ImageURL: image})
+			}
+		}
+	}
+	if hasImage {
+		return out
+	}
+	return text.String()
+}
+
+func responsesImageURL(p map[string]json.RawMessage) *OAIImageURL {
+	var url string
+	if json.Unmarshal(p["image_url"], &url) != nil {
+		var obj struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal(p["image_url"], &obj) == nil {
+			url = obj.URL
+		}
+	}
+	if url == "" {
+		_ = json.Unmarshal(p["url"], &url)
+	}
+	if url == "" {
+		return nil
+	}
+	return &OAIImageURL{URL: url}
+}
+
 func responsesContentText(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -591,6 +804,8 @@ func contentToOpenAI(m AMessage) []OAIMessage {
 		return []OAIMessage{{Role: m.Role, Content: string(m.Content)}}
 	}
 	var text strings.Builder
+	var parts []OAIContentPart
+	hasImage := false
 	var calls []OAIToolCall
 	var toolMsgs []OAIMessage
 	for _, b := range blocks {
@@ -601,6 +816,14 @@ func contentToOpenAI(m AMessage) []OAIMessage {
 			var v string
 			_ = json.Unmarshal(b["text"], &v)
 			text.WriteString(v)
+			if v != "" {
+				parts = append(parts, OAIContentPart{Type: "text", Text: v})
+			}
+		case "image":
+			if image := anthropicImageURL(b); image != nil {
+				hasImage = true
+				parts = append(parts, OAIContentPart{Type: "image_url", ImageURL: image})
+			}
 		case "tool_use":
 			var id, name string
 			_ = json.Unmarshal(b["id"], &id)
@@ -618,7 +841,7 @@ func contentToOpenAI(m AMessage) []OAIMessage {
 	}
 	if len(calls) > 0 {
 		msg := assistantToolCallsMessage(calls)
-		msg.Content = text.String()
+		msg.Content = openAIContentValue(text.String(), parts, hasImage)
 		return []OAIMessage{msg}
 	}
 	if len(toolMsgs) > 0 {
@@ -631,7 +854,43 @@ func contentToOpenAI(m AMessage) []OAIMessage {
 		}
 		return out
 	}
-	return []OAIMessage{{Role: m.Role, Content: text.String()}}
+	return []OAIMessage{{Role: m.Role, Content: openAIContentValue(text.String(), parts, hasImage)}}
+}
+
+func openAIContentValue(text string, parts []OAIContentPart, hasImage bool) any {
+	if hasImage {
+		return parts
+	}
+	return text
+}
+
+func anthropicImageURL(b map[string]json.RawMessage) *OAIImageURL {
+	var source struct {
+		Type      string `json:"type"`
+		MediaType string `json:"media_type"`
+		Data      string `json:"data"`
+		URL       string `json:"url"`
+	}
+	if json.Unmarshal(b["source"], &source) != nil {
+		return nil
+	}
+	if source.URL != "" || source.Type == "url" {
+		if source.URL == "" {
+			return nil
+		}
+		return &OAIImageURL{URL: source.URL}
+	}
+	if source.Data == "" {
+		return nil
+	}
+	if strings.HasPrefix(source.Data, "data:") {
+		return &OAIImageURL{URL: source.Data}
+	}
+	mediaType := source.MediaType
+	if mediaType == "" {
+		mediaType = "image/png"
+	}
+	return &OAIImageURL{URL: "data:" + mediaType + ";base64," + source.Data}
 }
 
 func systemText(raw json.RawMessage) string {
@@ -1150,7 +1409,7 @@ func writeCodexModelCatalog(path string) error {
 			"auto_compact_token_limit":         nil,
 			"effective_context_window_percent": 95,
 			"experimental_supported_tools":     []any{},
-			"input_modalities":                 []string{"text"},
+			"input_modalities":                 modelInputModalities(id),
 			"supports_search_tool":             false,
 		})
 	}

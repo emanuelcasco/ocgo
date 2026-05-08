@@ -69,9 +69,30 @@ func TestWriteCodexModelCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(b)
-	for _, want := range []string{`"models"`, `"slug": "deepseek-v4-pro"`, `"context_window": 128000`, `"truncation_policy"`} {
+	for _, want := range []string{`"models"`, `"slug": "deepseek-v4-pro"`, `"context_window": 128000`, `"truncation_policy"`, `"supports_image_detail_original": false`, `"image"`} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("missing %q in:\n%s", want, content)
+		}
+	}
+}
+
+func TestCodexModelCatalogAllowsImagesForKnownVisionModels(t *testing.T) {
+	if !modelSupportsImages("kimi-k2.6") {
+		t.Fatal("kimi-k2.6 should support image inputs")
+	}
+	if modelSupportsImages("deepseek-v4-pro") {
+		t.Fatal("deepseek-v4-pro should not support image inputs")
+	}
+	for _, tc := range []struct {
+		model string
+		want  []string
+	}{
+		{model: "kimi-k2.6", want: []string{"text", "image"}},
+		{model: "deepseek-v4-pro", want: []string{"text"}},
+	} {
+		got := modelInputModalities(tc.model)
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Fatalf("%s modalities = %+v, want %+v", tc.model, got, tc.want)
 		}
 	}
 }
@@ -141,9 +162,104 @@ func TestAnthropicToolResultPreservesFollowingUserText(t *testing.T) {
 	if messages[0].Role != "tool" || messages[0].ToolCallID != "call_123" || messages[0].Content != "09:33:16" {
 		t.Fatalf("bad tool result conversion: %+v", messages[0])
 	}
-	if messages[1].Role != "user" || !strings.Contains(messages[1].Content, "figma.example") {
+	if messages[1].Role != "user" || !strings.Contains(contentString(messages[1].Content), "figma.example") {
 		t.Fatalf("following user text was not preserved: %+v", messages[1])
 	}
+}
+
+func TestResponsesInputPreservesImages(t *testing.T) {
+	messages := responsesInputToMessages([]byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"describe this"},{"type":"input_image","image_url":"data:image/png;base64,abc","detail":"high"}]}]`))
+	if len(messages) != 1 {
+		t.Fatalf("got %d messages", len(messages))
+	}
+	parts, ok := messages[0].Content.([]OAIContentPart)
+	if !ok {
+		t.Fatalf("content should be multimodal parts: %+v", messages[0].Content)
+	}
+	if len(parts) != 2 || parts[0].Type != "text" || parts[0].Text != "describe this" {
+		t.Fatalf("bad text part: %+v", parts)
+	}
+	if parts[1].Type != "image_url" || parts[1].ImageURL == nil || parts[1].ImageURL.URL != "data:image/png;base64,abc" || parts[1].ImageURL.Detail != "" {
+		t.Fatalf("bad image part: %+v", parts[1])
+	}
+}
+
+func TestResponsesImageKeepsKimiModel(t *testing.T) {
+	req := ResponsesRequest{Model: "kimi-k2.6", Input: []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"describe this"},{"type":"input_image","image_url":"data:image/png;base64,abc"}]}]`)}
+	out := responsesToChat(req)
+	if out.Model != "kimi-k2.6" {
+		t.Fatalf("image request should keep Kimi model, got %q", out.Model)
+	}
+	if err := validateImageSupport(out); err != nil {
+		t.Fatalf("Kimi image request should validate: %v", err)
+	}
+}
+
+func TestResponsesImageRejectsUnsupportedModel(t *testing.T) {
+	req := ResponsesRequest{Model: "deepseek-v4-pro", Input: []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"describe this"},{"type":"input_image","image_url":"data:image/png;base64,abc"}]}]`)}
+	out := responsesToChat(req)
+	if err := validateImageSupport(out); err == nil || !strings.Contains(err.Error(), "deepseek-v4-pro") {
+		t.Fatalf("DeepSeek image request should be rejected, got %v", err)
+	}
+}
+
+func TestRawChatImageKeepsKimiAndStripsDetail(t *testing.T) {
+	body, err := prepareChatBody([]byte(`{"model":"kimi-k2.6","messages":[{"role":"user","content":[{"type":"text","text":"describe this"},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc","detail":"high"}}]}]}`))
+	if err != nil {
+		t.Fatalf("Kimi image request should validate: %v", err)
+	}
+	if !strings.Contains(string(body), `"model":"kimi-k2.6"`) {
+		t.Fatalf("image chat body should keep Kimi model: %s", string(body))
+	}
+	if strings.Contains(string(body), `"detail"`) {
+		t.Fatalf("image detail should be stripped for compatibility: %s", string(body))
+	}
+}
+
+func TestRawChatImageRejectsUnsupportedModel(t *testing.T) {
+	_, err := prepareChatBody([]byte(`{"model":"deepseek-v4-pro","messages":[{"role":"user","content":[{"type":"text","text":"describe this"},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}]}]}`))
+	if err == nil || !strings.Contains(err.Error(), "deepseek-v4-pro") {
+		t.Fatalf("DeepSeek image request should be rejected, got %v", err)
+	}
+}
+
+func TestAnthropicContentPreservesImages(t *testing.T) {
+	messages := contentToOpenAI(AMessage{Role: "user", Content: []byte(`[{"type":"text","text":"what is this?"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"abc"}}]`)})
+	if len(messages) != 1 {
+		t.Fatalf("got %d messages", len(messages))
+	}
+	parts, ok := messages[0].Content.([]OAIContentPart)
+	if !ok {
+		t.Fatalf("content should be multimodal parts: %+v", messages[0].Content)
+	}
+	if len(parts) != 2 || parts[0].Text != "what is this?" {
+		t.Fatalf("bad text part: %+v", parts)
+	}
+	if parts[1].ImageURL == nil || parts[1].ImageURL.URL != "data:image/jpeg;base64,abc" {
+		t.Fatalf("bad image part: %+v", parts[1])
+	}
+}
+
+func TestAnthropicImageKeepsKimiModel(t *testing.T) {
+	out := convertRequest(AnthropicRequest{Model: "kimi-k2.6", Messages: []AMessage{{Role: "user", Content: []byte(`[{"type":"text","text":"what is this?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc"}}]`)}}})
+	if out.Model != "kimi-k2.6" {
+		t.Fatalf("image request should keep Kimi model, got %q", out.Model)
+	}
+	if err := validateImageSupport(out); err != nil {
+		t.Fatalf("Kimi image request should validate: %v", err)
+	}
+}
+
+func TestAnthropicImageRejectsUnsupportedModel(t *testing.T) {
+	out := convertRequest(AnthropicRequest{Model: "deepseek-v4-pro", Messages: []AMessage{{Role: "user", Content: []byte(`[{"type":"text","text":"what is this?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc"}}]`)}}})
+	if err := validateImageSupport(out); err == nil || !strings.Contains(err.Error(), "deepseek-v4-pro") {
+		t.Fatalf("DeepSeek image request should be rejected, got %v", err)
+	}
+}
+
+func contentString(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 func TestStreamAnthropicForwardsToolCalls(t *testing.T) {
