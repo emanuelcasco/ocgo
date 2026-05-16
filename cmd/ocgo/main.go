@@ -60,13 +60,18 @@ type ATool struct {
 }
 
 type OAIRequest struct {
-	Model       string       `json:"model"`
-	Messages    []OAIMessage `json:"messages"`
-	Stream      bool         `json:"stream,omitempty"`
-	MaxTokens   int          `json:"max_tokens,omitempty"`
-	Temperature *float64     `json:"temperature,omitempty"`
-	TopP        *float64     `json:"top_p,omitempty"`
-	Tools       []OAITool    `json:"tools,omitempty"`
+	Model         string            `json:"model"`
+	Messages      []OAIMessage      `json:"messages"`
+	Stream        bool              `json:"stream,omitempty"`
+	StreamOptions *OAIStreamOptions `json:"stream_options,omitempty"`
+	MaxTokens     int               `json:"max_tokens,omitempty"`
+	Temperature   *float64          `json:"temperature,omitempty"`
+	TopP          *float64          `json:"top_p,omitempty"`
+	Tools         []OAITool         `json:"tools,omitempty"`
+}
+
+type OAIStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type ResponsesRequest struct {
@@ -482,14 +487,14 @@ func prepareChatBody(body []byte) ([]byte, error) {
 	if json.Unmarshal(body, &req) != nil {
 		return body, nil
 	}
+	changed := requestStreamingUsage(req)
 	model, _ := req["model"].(string)
-	if !rawChatBodyHasImages(req) {
-		return body, nil
+	if rawChatBodyHasImages(req) {
+		if !modelSupportsImages(model) {
+			return nil, unsupportedImageModelError(model)
+		}
+		changed = stripRawChatImageDetails(req) || changed
 	}
-	if !modelSupportsImages(model) {
-		return nil, unsupportedImageModelError(model)
-	}
-	changed := stripRawChatImageDetails(req)
 	if !changed {
 		return body, nil
 	}
@@ -498,6 +503,23 @@ func prepareChatBody(body []byte) ([]byte, error) {
 		return body, nil
 	}
 	return out, nil
+}
+
+func requestStreamingUsage(req map[string]any) bool {
+	streaming, _ := req["stream"].(bool)
+	if !streaming {
+		return false
+	}
+	options, ok := req["stream_options"].(map[string]any)
+	if !ok {
+		options = map[string]any{}
+		req["stream_options"] = options
+	}
+	if enabled, _ := options["include_usage"].(bool); enabled {
+		return false
+	}
+	options["include_usage"] = true
+	return true
 }
 
 func rawChatBodyHasImages(req map[string]any) bool {
@@ -564,7 +586,7 @@ func convertRequest(ar AnthropicRequest) OAIRequest {
 	if model == "" || strings.HasPrefix(model, "claude-") {
 		model = "kimi-k2.6"
 	}
-	out := OAIRequest{Model: model, Stream: ar.Stream, MaxTokens: ar.MaxTokens, Temperature: ar.Temperature, TopP: ar.TopP}
+	out := OAIRequest{Model: model, Stream: ar.Stream, StreamOptions: streamUsageOptions(ar.Stream), MaxTokens: ar.MaxTokens, Temperature: ar.Temperature, TopP: ar.TopP}
 	if sys := systemText(ar.System); sys != "" {
 		out.Messages = append(out.Messages, OAIMessage{Role: "system", Content: sys})
 	}
@@ -582,7 +604,7 @@ func responsesToChat(rr ResponsesRequest) OAIRequest {
 	if model == "" {
 		model = "kimi-k2.6"
 	}
-	out := OAIRequest{Model: model, Stream: rr.Stream, MaxTokens: rr.MaxTokens, Temperature: rr.Temperature, TopP: rr.TopP}
+	out := OAIRequest{Model: model, Stream: rr.Stream, StreamOptions: streamUsageOptions(rr.Stream), MaxTokens: rr.MaxTokens, Temperature: rr.Temperature, TopP: rr.TopP}
 	if rr.Instructions != "" {
 		out.Messages = append(out.Messages, OAIMessage{Role: "system", Content: rr.Instructions})
 	}
@@ -593,6 +615,13 @@ func responsesToChat(rr ResponsesRequest) OAIRequest {
 		}
 	}
 	return out
+}
+
+func streamUsageOptions(streaming bool) *OAIStreamOptions {
+	if !streaming {
+		return nil
+	}
+	return &OAIStreamOptions{IncludeUsage: true}
 }
 
 func requestHasImages(or OAIRequest) bool {
@@ -927,6 +956,98 @@ func blockText(raw json.RawMessage) string {
 	return b.String()
 }
 
+type tokenUsage struct {
+	InputTokens       int
+	OutputTokens      int
+	TotalTokens       int
+	CachedInputTokens int
+	Present           bool
+}
+
+func usageFromJSON(raw json.RawMessage) tokenUsage {
+	var fields map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &fields) != nil {
+		return tokenUsage{}
+	}
+	return usageFromFields(fields)
+}
+
+func usageFromFields(fields map[string]any) tokenUsage {
+	if len(fields) == 0 {
+		return tokenUsage{}
+	}
+	u := tokenUsage{Present: true}
+	u.InputTokens = intField(fields, "prompt_tokens")
+	if u.InputTokens == 0 {
+		u.InputTokens = intField(fields, "input_tokens")
+	}
+	u.OutputTokens = intField(fields, "completion_tokens")
+	if u.OutputTokens == 0 {
+		u.OutputTokens = intField(fields, "output_tokens")
+	}
+	u.TotalTokens = intField(fields, "total_tokens")
+	if u.TotalTokens == 0 && (u.InputTokens > 0 || u.OutputTokens > 0) {
+		u.TotalTokens = u.InputTokens + u.OutputTokens
+	}
+	u.CachedInputTokens = cachedTokens(fields)
+	return u
+}
+
+func intField(fields map[string]any, name string) int {
+	v, ok := fields[name]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	}
+	return 0
+}
+
+func cachedTokens(fields map[string]any) int {
+	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
+		if nested, ok := fields[key].(map[string]any); ok {
+			if n := intField(nested, "cached_tokens"); n > 0 {
+				return n
+			}
+		}
+	}
+	return intField(fields, "cached_tokens")
+}
+
+func anthropicUsage(u tokenUsage) map[string]int {
+	usage := map[string]int{"input_tokens": u.InputTokens, "output_tokens": u.OutputTokens}
+	if u.CachedInputTokens > 0 {
+		usage["cache_read_input_tokens"] = u.CachedInputTokens
+	}
+	return usage
+}
+
+func anthropicDeltaUsage(u tokenUsage) map[string]int {
+	usage := map[string]int{"output_tokens": u.OutputTokens}
+	if u.InputTokens > 0 {
+		usage["input_tokens"] = u.InputTokens
+	}
+	if u.CachedInputTokens > 0 {
+		usage["cache_read_input_tokens"] = u.CachedInputTokens
+	}
+	return usage
+}
+
+func responsesUsage(u tokenUsage) map[string]any {
+	usage := map[string]any{"input_tokens": u.InputTokens, "output_tokens": u.OutputTokens, "total_tokens": u.TotalTokens}
+	if u.CachedInputTokens > 0 {
+		usage["input_tokens_details"] = map[string]int{"cached_tokens": u.CachedInputTokens}
+	}
+	return usage
+}
+
 func streamAnthropic(w http.ResponseWriter, body io.Reader, model string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	flusher, _ := w.(http.Flusher)
@@ -940,6 +1061,7 @@ func streamAnthropic(w http.ResponseWriter, body io.Reader, model string) {
 	toolIndexes := map[int]int{}
 	var tools []streamedResponseToolCall
 	var reasoning strings.Builder
+	usage := tokenUsage{}
 	s := bufio.NewScanner(body)
 	for s.Scan() {
 		line := strings.TrimSpace(s.Text())
@@ -951,6 +1073,9 @@ func streamAnthropic(w http.ResponseWriter, body io.Reader, model string) {
 			break
 		}
 		chunk := parseOpenAIStreamChunk([]byte(data))
+		if chunk.Usage.Present {
+			usage = chunk.Usage
+		}
 		if chunk.ReasoningContent != "" {
 			reasoning.WriteString(chunk.ReasoningContent)
 		}
@@ -1014,7 +1139,8 @@ func streamAnthropic(w http.ResponseWriter, body io.Reader, model string) {
 	if len(tools) > 0 {
 		stopReason = "tool_use"
 	}
-	fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":%q,\"stop_sequence\":null},\"usage\":{\"output_tokens\":0}}\n\n", stopReason)
+	usageJSON, _ := json.Marshal(anthropicDeltaUsage(usage))
+	fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":%q,\"stop_sequence\":null},\"usage\":%s}\n\n", stopReason, usageJSON)
 	fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 }
 
@@ -1040,6 +1166,7 @@ func writeAnthropicResponse(w http.ResponseWriter, body io.Reader, model string)
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage json.RawMessage `json:"usage"`
 	}
 	_ = json.NewDecoder(body).Decode(&v)
 	text := ""
@@ -1047,7 +1174,7 @@ func writeAnthropicResponse(w http.ResponseWriter, body io.Reader, model string)
 		text = v.Choices[0].Message.Content
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"id": "ocgo", "type": "message", "role": "assistant", "model": model, "content": []map[string]string{{"type": "text", "text": text}}, "stop_reason": "end_turn", "usage": map[string]int{"input_tokens": 0, "output_tokens": 0}})
+	_ = json.NewEncoder(w).Encode(map[string]any{"id": "ocgo", "type": "message", "role": "assistant", "model": model, "content": []map[string]string{{"type": "text", "text": text}}, "stop_reason": "end_turn", "usage": anthropicUsage(usageFromJSON(v.Usage))})
 }
 
 func streamResponses(w http.ResponseWriter, body io.Reader, model string) {
@@ -1064,6 +1191,7 @@ func streamResponses(w http.ResponseWriter, body io.Reader, model string) {
 	nextOutputIndex := 0
 	var text strings.Builder
 	var reasoning strings.Builder
+	usage := tokenUsage{}
 	toolIndexes := map[int]int{}
 	var tools []streamedResponseToolCall
 	s := bufio.NewScanner(body)
@@ -1077,6 +1205,9 @@ func streamResponses(w http.ResponseWriter, body io.Reader, model string) {
 			break
 		}
 		chunk := parseOpenAIStreamChunk([]byte(data))
+		if chunk.Usage.Present {
+			usage = chunk.Usage
+		}
 		if chunk.ReasoningContent != "" {
 			reasoning.WriteString(chunk.ReasoningContent)
 		}
@@ -1144,7 +1275,7 @@ func streamResponses(w http.ResponseWriter, body io.Reader, model string) {
 		writeResponseEvent(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": tool.OutputIndex, "item": item})
 		output = append(output, item)
 	}
-	writeResponseEvent(w, "response.completed", map[string]any{"type": "response.completed", "response": map[string]any{"id": id, "object": "response", "model": model, "status": "completed", "output": output}})
+	writeResponseEvent(w, "response.completed", map[string]any{"type": "response.completed", "response": map[string]any{"id": id, "object": "response", "model": model, "status": "completed", "output": output, "usage": responsesUsage(usage)}})
 }
 
 type streamedResponseToolCall struct {
@@ -1163,6 +1294,7 @@ type openAIStreamChunk struct {
 	Content          string
 	ReasoningContent string
 	ToolCalls        []openAIStreamToolCall
+	Usage            tokenUsage
 }
 
 func parseOpenAIStreamChunk(data []byte) openAIStreamChunk {
@@ -1181,13 +1313,16 @@ func parseOpenAIStreamChunk(data []byte) openAIStreamChunk {
 				} `json:"tool_calls"`
 			} `json:"delta"`
 		} `json:"choices"`
+		Usage json.RawMessage `json:"usage"`
 	}
 	_ = json.Unmarshal(data, &v)
+	out := openAIStreamChunk{Usage: usageFromJSON(v.Usage)}
 	if len(v.Choices) == 0 {
-		return openAIStreamChunk{}
+		return out
 	}
 	delta := v.Choices[0].Delta
-	out := openAIStreamChunk{Content: delta.Content, ReasoningContent: delta.ReasoningContent}
+	out.Content = delta.Content
+	out.ReasoningContent = delta.ReasoningContent
 	for _, tc := range delta.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, openAIStreamToolCall{Index: tc.Index, ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
 	}
@@ -1208,6 +1343,7 @@ func writeResponsesResponse(w http.ResponseWriter, body io.Reader, model string)
 				ToolCalls        []OAIToolCall `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage json.RawMessage `json:"usage"`
 	}
 	_ = json.NewDecoder(body).Decode(&v)
 	text := ""
@@ -1225,7 +1361,7 @@ func writeResponsesResponse(w http.ResponseWriter, body io.Reader, model string)
 		output = append(output, map[string]any{"id": "msg_ocgo", "type": "message", "role": "assistant", "content": []map[string]string{{"type": "output_text", "text": text}}})
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_ocgo", "object": "response", "created_at": time.Now().Unix(), "model": model, "status": "completed", "output": output, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}})
+	_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_ocgo", "object": "response", "created_at": time.Now().Unix(), "model": model, "status": "completed", "output": output, "usage": responsesUsage(usageFromJSON(v.Usage))})
 }
 
 func countTokens(w http.ResponseWriter, r *http.Request) {

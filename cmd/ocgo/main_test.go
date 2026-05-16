@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -223,6 +224,39 @@ func TestRawChatImageRejectsUnsupportedModel(t *testing.T) {
 	}
 }
 
+func TestRawChatStreamRequestsUsage(t *testing.T) {
+	body, err := prepareChatBody([]byte(`{"model":"kimi-k2.6","stream":true,"stream_options":{"foo":"bar"},"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	options, ok := req["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing stream options in %s", string(body))
+	}
+	if options["include_usage"] != true || options["foo"] != "bar" {
+		t.Fatalf("bad stream options: %+v", options)
+	}
+}
+
+func TestConvertedStreamingRequestsAskForUsage(t *testing.T) {
+	anthropic := convertRequest(AnthropicRequest{Model: "kimi-k2.6", Stream: true, Messages: []AMessage{{Role: "user", Content: []byte(`hello`)}}})
+	if anthropic.StreamOptions == nil || !anthropic.StreamOptions.IncludeUsage {
+		t.Fatalf("anthropic conversion should request stream usage: %+v", anthropic.StreamOptions)
+	}
+	responses := responsesToChat(ResponsesRequest{Model: "kimi-k2.6", Stream: true, Input: []byte(`"hello"`)})
+	if responses.StreamOptions == nil || !responses.StreamOptions.IncludeUsage {
+		t.Fatalf("responses conversion should request stream usage: %+v", responses.StreamOptions)
+	}
+	plain := responsesToChat(ResponsesRequest{Model: "kimi-k2.6", Input: []byte(`"hello"`)})
+	if plain.StreamOptions != nil {
+		t.Fatalf("non-streaming conversion should not set stream options: %+v", plain.StreamOptions)
+	}
+}
+
 func TestAnthropicContentPreservesImages(t *testing.T) {
 	messages := contentToOpenAI(AMessage{Role: "user", Content: []byte(`[{"type":"text","text":"what is this?"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"abc"}}]`)})
 	if len(messages) != 1 {
@@ -286,6 +320,88 @@ func TestParseWindowsNetstatPIDMatchesIPv6(t *testing.T) {
 	}
 	if pid != 2468 {
 		t.Fatalf("pid = %d, want 2468", pid)
+	}
+}
+
+func TestWriteAnthropicResponseIncludesUsage(t *testing.T) {
+	body := strings.NewReader(`{"choices":[{"message":{"content":"done"}}],"usage":{"prompt_tokens":11,"completion_tokens":5,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":4}}}`)
+	w := httptest.NewRecorder()
+	writeAnthropicResponse(w, body, "kimi-k2.6")
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	usage, ok := out["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing usage: %+v", out)
+	}
+	if usage["input_tokens"] != float64(11) || usage["output_tokens"] != float64(5) || usage["cache_read_input_tokens"] != float64(4) {
+		t.Fatalf("bad anthropic usage: %+v", usage)
+	}
+}
+
+func TestWriteResponsesResponseIncludesUsage(t *testing.T) {
+	body := strings.NewReader(`{"choices":[{"message":{"content":"done"}}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10,"input_tokens_details":{"cached_tokens":2}}}`)
+	w := httptest.NewRecorder()
+	writeResponsesResponse(w, body, "kimi-k2.6")
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	usage, ok := out["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing usage: %+v", out)
+	}
+	if usage["input_tokens"] != float64(7) || usage["output_tokens"] != float64(3) || usage["total_tokens"] != float64(10) {
+		t.Fatalf("bad responses usage: %+v", usage)
+	}
+	details, ok := usage["input_tokens_details"].(map[string]any)
+	if !ok || details["cached_tokens"] != float64(2) {
+		t.Fatalf("bad cached details: %+v", usage["input_tokens_details"])
+	}
+}
+
+func TestParseOpenAIStreamChunkReadsUsageOnly(t *testing.T) {
+	chunk := parseOpenAIStreamChunk([]byte(`{"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}`))
+	if !chunk.Usage.Present || chunk.Usage.InputTokens != 8 || chunk.Usage.OutputTokens != 4 || chunk.Usage.TotalTokens != 12 {
+		t.Fatalf("bad stream usage: %+v", chunk.Usage)
+	}
+	if chunk.Content != "" || len(chunk.ToolCalls) != 0 {
+		t.Fatalf("usage-only chunk should not include deltas: %+v", chunk)
+	}
+}
+
+func TestStreamAnthropicIncludesFinalUsage(t *testing.T) {
+	body := strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"hi"}}]}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n"))
+	w := httptest.NewRecorder()
+	streamAnthropic(w, body, "kimi-k2.6")
+	out := w.Body.String()
+	for _, want := range []string{`"input_tokens":7`, `"output_tokens":3`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestStreamResponsesIncludesCompletedUsage(t *testing.T) {
+	body := strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"hi"}}]}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n"))
+	w := httptest.NewRecorder()
+	streamResponses(w, body, "kimi-k2.6")
+	out := w.Body.String()
+	for _, want := range []string{`event: response.completed`, `"input_tokens":7`, `"output_tokens":3`, `"total_tokens":10`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
 	}
 }
 
