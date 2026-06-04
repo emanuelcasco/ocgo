@@ -68,16 +68,55 @@ type remoteAPIResponse struct {
 	} `json:"opencode-go"`
 }
 
-var (
-	remoteMu      sync.RWMutex
-	remoteData    map[string]remoteModelInfo
-	remoteErr     error
-	remoteFetched bool
+// httpClient is the shared HTTP client for all outbound API calls.
+var httpClient = &http.Client{Timeout: 8 * time.Second}
 
-	officialMu      sync.RWMutex
-	officialData    []string
-	officialErr     error
-	officialFetched bool
+// lazyFetcher provides cached fetching with double-checked locking.
+type lazyFetcher[T any] struct {
+	mu      sync.RWMutex
+	data    T
+	err     error
+	fetched bool
+	fetch   func() (T, error)
+}
+
+func newLazyFetcher[T any](fetch func() (T, error)) *lazyFetcher[T] {
+	return &lazyFetcher[T]{fetch: fetch}
+}
+
+func (f *lazyFetcher[T]) get() (T, error) {
+	f.mu.RLock()
+	if f.fetched {
+		d, e := f.data, f.err
+		f.mu.RUnlock()
+		return d, e
+	}
+	f.mu.RUnlock()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.fetched {
+		return f.data, f.err
+	}
+	f.data, f.err = f.fetch()
+	f.fetched = true
+	return f.data, f.err
+}
+
+func (f *lazyFetcher[T]) refresh() {
+	f.mu.Lock()
+	f.fetched = false
+	var zero T
+	f.data = zero
+	f.err = nil
+	f.mu.Unlock()
+	f.get()
+}
+
+var (
+	remoteModels   = newLazyFetcher(fetchRemoteModels)
+	officialModels = newLazyFetcher(fetchOfficialModels)
 )
 
 type Config struct {
@@ -371,7 +410,7 @@ func fetchRemoteModels() (map[string]remoteModelInfo, error) {
 		return nil, err
 	}
 
-	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -391,33 +430,12 @@ func fetchRemoteModels() (map[string]remoteModelInfo, error) {
 
 // getRemoteModels returns cached remote models, fetching on first call.
 func getRemoteModels() (map[string]remoteModelInfo, error) {
-	remoteMu.RLock()
-	if remoteFetched {
-		d, e := remoteData, remoteErr
-		remoteMu.RUnlock()
-		return d, e
-	}
-	remoteMu.RUnlock()
-
-	remoteMu.Lock()
-	defer remoteMu.Unlock()
-
-	if remoteFetched {
-		return remoteData, remoteErr
-	}
-	remoteData, remoteErr = fetchRemoteModels()
-	remoteFetched = true
-	return remoteData, remoteErr
+	return remoteModels.get()
 }
 
 // refreshRemoteModels forces a fresh fetch from the remote API.
 func refreshRemoteModels() {
-	remoteMu.Lock()
-	remoteFetched = false
-	remoteData = nil
-	remoteErr = nil
-	remoteMu.Unlock()
-	getRemoteModels()
+	remoteModels.refresh()
 }
 
 // ---- Official model list (OpenCode Go whitelist) ----
@@ -431,7 +449,7 @@ func fetchOfficialModels() ([]string, error) {
 		return nil, err
 	}
 
-	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -457,41 +475,16 @@ func fetchOfficialModels() ([]string, error) {
 
 // getOfficialModels returns cached official model IDs, fetching on first call.
 func getOfficialModels() ([]string, error) {
-	officialMu.RLock()
-	if officialFetched {
-		d, e := officialData, officialErr
-		officialMu.RUnlock()
-		return d, e
-	}
-	officialMu.RUnlock()
-
-	officialMu.Lock()
-	defer officialMu.Unlock()
-
-	if officialFetched {
-		return officialData, officialErr
-	}
-	officialData, officialErr = fetchOfficialModels()
-	officialFetched = true
-	return officialData, officialErr
+	return officialModels.get()
 }
 
-// refreshAllModels forces a fresh fetch of both official and metadata APIs.
+// refreshAllModels forces a fresh fetch of both official and metadata APIs concurrently.
 func refreshAllModels() {
-	remoteMu.Lock()
-	remoteFetched = false
-	remoteData = nil
-	remoteErr = nil
-	remoteMu.Unlock()
-
-	officialMu.Lock()
-	officialFetched = false
-	officialData = nil
-	officialErr = nil
-	officialMu.Unlock()
-
-	getOfficialModels()
-	getRemoteModels()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); remoteModels.refresh() }()
+	go func() { defer wg.Done(); officialModels.refresh() }()
+	wg.Wait()
 }
 
 func defaultModelMappings() map[string]map[string]string {
@@ -1320,13 +1313,13 @@ func prepareChatBody(body []byte) ([]byte, error) {
 		changed = stripRawChatImageDetails(req) || changed
 	}
 	if !changed {
-		return body, nil
+		return sanitizeRawChatToolMessages(body), nil
 	}
 	out, err := json.Marshal(req)
 	if err != nil {
-		return body, nil
+		return sanitizeRawChatToolMessages(body), nil
 	}
-	return out, nil
+	return sanitizeRawChatToolMessages(out), nil
 }
 
 func applyRawChatReasoningEffort(req map[string]any) bool {
@@ -1522,7 +1515,7 @@ func responsesToChat(rr ResponsesRequest) OAIRequest {
 	if rr.Instructions != "" {
 		out.Messages = append(out.Messages, OAIMessage{Role: "system", Content: rr.Instructions})
 	}
-	out.Messages = append(out.Messages, responsesInputToMessages(rr.Input)...)
+	out.Messages = append(out.Messages, sanitizeOAIToolMessages(responsesInputToMessages(rr.Input))...)
 	for _, t := range rr.Tools {
 		if tool, ok := responseBuiltinToolToAnthropic(t); ok {
 			out.AnthropicTools = appendUniqueAnthropicTool(out.AnthropicTools, tool)
@@ -1840,6 +1833,96 @@ func responsesInputToMessages(raw json.RawMessage) []OAIMessage {
 
 func assistantToolCallsMessage(calls []OAIToolCall) OAIMessage {
 	return OAIMessage{Role: "assistant", ToolCalls: calls, ReasoningContent: cachedReasoningContent(calls)}
+}
+
+// sanitizeOAIToolMessages ensures that every assistant message with tool_calls
+// is immediately followed by tool messages responding to each tool_call_id.
+// This fixes sequences that may become incomplete due to history truncation
+// or conversation-state management in upstream clients (e.g. Codex).
+func sanitizeOAIToolMessages(messages []OAIMessage) []OAIMessage {
+	if len(messages) == 0 {
+		return messages
+	}
+	// Build a set of all assistant tool_call IDs (these need a matching tool result).
+	needResult := make(map[string]bool)
+	for _, m := range messages {
+		if m.Role == "assistant" {
+			for _, tc := range m.ToolCalls {
+				needResult[tc.ID] = true
+			}
+		}
+	}
+	// Build a set of tool result call IDs actually present.
+	hasResult := make(map[string]bool)
+	for _, m := range messages {
+		if m.Role == "tool" && m.ToolCallID != "" {
+			hasResult[m.ToolCallID] = true
+		}
+	}
+	var out []OAIMessage
+	// missingCalls tracks tool_call IDs from the last assistant message that
+	// still need a placeholder tool result. Placeholders are flushed right
+	// before the next non-tool message (or at the end), so existing tool
+	// results always appear first.
+	var missingCalls []OAIToolCall
+	flushPlaceholders := func() {
+		for _, tc := range missingCalls {
+			if !hasResult[tc.ID] {
+				out = append(out, OAIMessage{Role: "tool", ToolCallID: tc.ID, Content: "Tool result unavailable."})
+			}
+		}
+		missingCalls = nil
+	}
+	for _, m := range messages {
+		if m.Role == "tool" {
+			if !needResult[m.ToolCallID] {
+				continue // orphaned tool message
+			}
+			out = append(out, m)
+			continue
+		}
+		// Non-tool message: flush any pending placeholders from the previous
+		// assistant tool_calls before emitting this message.
+		flushPlaceholders()
+		out = append(out, m)
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			missingCalls = append(missingCalls[:0], m.ToolCalls...)
+		}
+	}
+	flushPlaceholders()
+	return out
+}
+
+// sanitizeRawChatToolMessages parses a raw chat-completions JSON body,
+// sanitizes the tool_calls/tool message pairing, and returns the (possibly
+// modified) body. If parsing fails the original body is returned unchanged.
+func sanitizeRawChatToolMessages(body []byte) []byte {
+	var req map[string]json.RawMessage
+	if json.Unmarshal(body, &req) != nil {
+		return body
+	}
+	rawMsgs, ok := req["messages"]
+	if !ok {
+		return body
+	}
+	var messages []OAIMessage
+	if json.Unmarshal(rawMsgs, &messages) != nil {
+		return body
+	}
+	sanitized := sanitizeOAIToolMessages(messages)
+	newMsgs, err := json.Marshal(sanitized)
+	if err != nil {
+		return body
+	}
+	if bytes.Equal(rawMsgs, newMsgs) {
+		return body // no change needed
+	}
+	req["messages"] = newMsgs
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func cachedReasoningContent(calls []OAIToolCall) string {

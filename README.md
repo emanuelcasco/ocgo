@@ -329,8 +329,8 @@ Proxy runtime files are stored in:
 Clone the repository and enter the project directory:
 
 ```bash
-git clone <repository-url>
-cd ocgo-cc
+git clone https://github.com/emanuelcasco/ocgo.git
+cd ocgo
 ```
 
 Install Go 1.22 or newer, then download dependencies:

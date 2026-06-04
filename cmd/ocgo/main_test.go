@@ -954,3 +954,124 @@ func TestStreamResponsesForwardsToolCalls(t *testing.T) {
 		t.Fatalf("missing cached reasoning content: %+v", messages[0])
 	}
 }
+
+func TestSanitizeOAIToolMessagesValidSequenceUnchanged(t *testing.T) {
+	in := []OAIMessage{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", ToolCalls: []OAIToolCall{{ID: "call_1", Type: "function", Function: OAICallFunction{Name: "Bash"}}}},
+		{Role: "tool", ToolCallID: "call_1", Content: "ok"},
+		{Role: "assistant", Content: "done"},
+	}
+	out := sanitizeOAIToolMessages(in)
+	if len(out) != 4 {
+		t.Fatalf("valid sequence should not change: got %d messages", len(out))
+	}
+}
+
+func TestSanitizeOAIToolMessagesInsertsMissingToolResult(t *testing.T) {
+	// Simulate truncated history: assistant made a tool call but the result is missing.
+	in := []OAIMessage{
+		{Role: "user", Content: "run pwd"},
+		{Role: "assistant", ToolCalls: []OAIToolCall{{ID: "call_missing", Type: "function", Function: OAICallFunction{Name: "Bash"}}}},
+		{Role: "assistant", Content: "done"},
+	}
+	out := sanitizeOAIToolMessages(in)
+	if len(out) != 4 {
+		t.Fatalf("expected 4 messages after inserting placeholder, got %d: %+v", len(out), out)
+	}
+	if out[2].Role != "tool" || out[2].ToolCallID != "call_missing" {
+		t.Fatalf("missing placeholder tool message at index 2: %+v", out[2])
+	}
+	if out[2].Content != "Tool result unavailable." {
+		t.Fatalf("bad placeholder content: %v", out[2].Content)
+	}
+}
+
+func TestSanitizeOAIToolMessagesRemovesOrphanedToolMessage(t *testing.T) {
+	// Simulate truncated history: tool result remains but the assistant tool_calls message was removed.
+	in := []OAIMessage{
+		{Role: "user", Content: "hello"},
+		{Role: "tool", ToolCallID: "orphan_call", Content: "result"},
+		{Role: "assistant", Content: "done"},
+	}
+	out := sanitizeOAIToolMessages(in)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 messages after removing orphan tool, got %d: %+v", len(out), out)
+	}
+	for _, m := range out {
+		if m.Role == "tool" {
+			t.Fatalf("orphaned tool message should have been removed: %+v", m)
+		}
+	}
+}
+
+func TestSanitizeOAIToolMessagesHandlesMultipleToolCallsInOneTurn(t *testing.T) {
+	in := []OAIMessage{
+		{Role: "user", Content: "do two things"},
+		{Role: "assistant", ToolCalls: []OAIToolCall{
+			{ID: "call_a", Type: "function", Function: OAICallFunction{Name: "Bash"}},
+			{ID: "call_b", Type: "function", Function: OAICallFunction{Name: "Read"}},
+		}},
+		{Role: "tool", ToolCallID: "call_a", Content: "result_a"},
+		// call_b result is missing
+	}
+	out := sanitizeOAIToolMessages(in)
+	if len(out) != 4 {
+		t.Fatalf("expected 4 messages after inserting placeholder for call_b, got %d: %+v", len(out), out)
+	}
+	if out[3].Role != "tool" || out[3].ToolCallID != "call_b" {
+		t.Fatalf("missing placeholder for call_b at index 3: %+v", out[3])
+	}
+}
+
+func TestSanitizeOAIToolMessagesEmptyInput(t *testing.T) {
+	out := sanitizeOAIToolMessages(nil)
+	if len(out) != 0 {
+		t.Fatalf("nil input should return empty, got %d", len(out))
+	}
+	out = sanitizeOAIToolMessages([]OAIMessage{})
+	if len(out) != 0 {
+		t.Fatalf("empty input should return empty, got %d", len(out))
+	}
+}
+
+func TestSanitizeOAIToolMessagesPreservesAssistantWithToolCallsFollowedByAllResults(t *testing.T) {
+	// Realistic multi-turn scenario.
+	in := []OAIMessage{
+		{Role: "user", Content: "run pwd"},
+		{Role: "assistant", ToolCalls: []OAIToolCall{{ID: "call_1", Type: "function", Function: OAICallFunction{Name: "Bash"}}}},
+		{Role: "tool", ToolCallID: "call_1", Content: "/tmp"},
+		{Role: "assistant", Content: "Current dir is /tmp"},
+		{Role: "user", Content: "now run ls"},
+		{Role: "assistant", ToolCalls: []OAIToolCall{{ID: "call_2", Type: "function", Function: OAICallFunction{Name: "Bash"}}}},
+		{Role: "tool", ToolCallID: "call_2", Content: "file1 file2"},
+	}
+	out := sanitizeOAIToolMessages(in)
+	if len(out) != 7 {
+		t.Fatalf("valid multi-turn sequence should not change: got %d messages", len(out))
+	}
+}
+
+func TestSanitizeRawChatToolMessages(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"hello"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{}"}}]},{"role":"assistant","content":"done"}]}`)
+	out := sanitizeRawChatToolMessages(body)
+	var req map[string]any
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatal(err)
+	}
+	msgs, ok := req["messages"].([]any)
+	if !ok {
+		t.Fatal("messages not found")
+	}
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 messages after sanitization, got %d", len(msgs))
+	}
+	// Verify the inserted tool message.
+	toolMsg, ok := msgs[2].(map[string]any)
+	if !ok {
+		t.Fatal("tool message not a map")
+	}
+	if toolMsg["role"] != "tool" || toolMsg["tool_call_id"] != "call_1" {
+		t.Fatalf("bad inserted tool message: %+v", toolMsg)
+	}
+}
