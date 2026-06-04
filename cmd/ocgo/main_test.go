@@ -107,7 +107,7 @@ func TestWriteCodexModelCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(b)
-	for _, want := range []string{`"models"`, `"slug": "deepseek-v4-pro"`, `"slug": "qwen3.7-max"`, `"slug": "minimax-m3"`, `"context_window": 128000`, `"truncation_policy"`, `"supports_image_detail_original": false`, `"image"`} {
+	for _, want := range []string{`"models"`, `"slug": "deepseek-v4-pro"`, `"slug": "qwen3.7-max"`, `"slug": "minimax-m3"`, `"context_window"`, `"truncation_policy"`, `"supports_image_detail_original": false`, `"image"`} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("missing %q in:\n%s", want, content)
 		}
@@ -243,7 +243,7 @@ func TestCodexModelCatalogAllowsImagesForKnownVisionModels(t *testing.T) {
 		model string
 		want  []string
 	}{
-		{model: "kimi-k2.6", want: []string{"text", "image"}},
+		{model: "kimi-k2.6", want: []string{"text", "image", "video"}},
 		{model: "minimax-m3", want: []string{"text", "image", "video"}},
 		{model: "deepseek-v4-pro", want: []string{"text"}},
 	} {

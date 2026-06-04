@@ -35,6 +35,51 @@ var version = "dev"
 
 var anthropicURL = "https://opencode.ai/zen/go/v1/messages"
 
+const remoteModelsURL = "https://models.dev/api.json"
+
+// officialModelsURL is the OpenCode Go official model list.
+const officialModelsURL = "https://opencode.ai/zen/go/v1/models"
+
+// officialModelsResponse matches the OpenCode Go /v1/models JSON shape.
+type officialModelsResponse struct {
+	Data []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+}
+
+// remoteModelInfo represents a single model from the models.dev API.
+type remoteModelInfo struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Modalities struct {
+		Input  []string `json:"input"`
+		Output []string `json:"output"`
+	} `json:"modalities"`
+	Limit struct {
+		Context int `json:"context"`
+		Output  int `json:"output"`
+	} `json:"limit"`
+}
+
+// remoteAPIResponse is the top-level structure of the models.dev API response.
+type remoteAPIResponse struct {
+	OpenCodeGo struct {
+		Models map[string]remoteModelInfo `json:"models"`
+	} `json:"opencode-go"`
+}
+
+var (
+	remoteMu      sync.RWMutex
+	remoteData    map[string]remoteModelInfo
+	remoteErr     error
+	remoteFetched bool
+
+	officialMu      sync.RWMutex
+	officialData    []string
+	officialErr     error
+	officialFetched bool
+)
+
 type Config struct {
 	APIKey string `json:"api_key"`
 	Host   string `json:"host"`
@@ -203,6 +248,8 @@ func setupCmd() *cobra.Command {
 
 func listCmd() *cobra.Command {
 	return &cobra.Command{Use: "list", Aliases: []string{"ls", "models"}, Short: "List OpenCode Go models", Run: func(cmd *cobra.Command, args []string) {
+		// Always fetch fresh from both official and metadata APIs.
+		refreshAllModels()
 		fmt.Println("OpenCode Go models:")
 		for _, m := range knownModelIDs() {
 			fmt.Printf("  %s\n", m)
@@ -211,6 +258,21 @@ func listCmd() *cobra.Command {
 }
 
 func knownModelIDs() []string {
+	// 1. Try official model list first (authoritative whitelist).
+	if official, err := getOfficialModels(); err == nil && len(official) > 0 {
+		sort.Strings(official)
+		return official
+	}
+	// 2. Fallback: use models.dev data.
+	if models, err := getRemoteModels(); err == nil && len(models) > 0 {
+		ids := make([]string, 0, len(models))
+		for id := range models {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		return ids
+	}
+	// 3. Hardcoded fallback.
 	return []string{"glm-5.1", "glm-5", "kimi-k2.6", "kimi-k2.5", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "minimax-m3", "minimax-m2.7", "minimax-m2.5", "deepseek-v4-pro", "deepseek-v4-flash", "qwen3.7-max", "qwen3.6-plus", "qwen3.5-plus"}
 }
 
@@ -233,6 +295,8 @@ type openCodeModelMetadata struct {
 
 func modelMetadata(model string) openCodeModelMetadata {
 	id := modelID(model)
+
+	// Start with defaults.
 	meta := openCodeModelMetadata{
 		DisplayName:             id,
 		Description:             "OpenCode Go model",
@@ -244,14 +308,47 @@ func modelMetadata(model string) openCodeModelMetadata {
 		SupportedReasoning:      []any{},
 		DefaultReasoningSummary: "none",
 	}
+
+	// Try to enrich from remote API first.
+	if remote, err := getRemoteModels(); err == nil {
+		if rm, ok := remote[id]; ok {
+			meta.DisplayName = rm.Name
+			meta.Description = rm.Name + " via OpenCode Go"
+			if len(rm.Modalities.Input) > 0 {
+				meta.InputModalities = rm.Modalities.Input
+			}
+			meta.ContextWindow = rm.Limit.Context
+			meta.MaxContextWindow = rm.Limit.Context
+			// Derive CodexInputModalities: exclude video, audio, pdf.
+			codexMods := make([]string, 0, len(rm.Modalities.Input))
+			for _, m := range rm.Modalities.Input {
+				if m != "video" && m != "audio" && m != "pdf" {
+					codexMods = append(codexMods, m)
+				}
+			}
+			if len(codexMods) > 0 {
+				meta.CodexInputModalities = codexMods
+			}
+		}
+	} else {
+		// Fallback: use hardcoded values for models that need them.
+		switch id {
+		case "minimax-m3":
+			meta.DisplayName = "MiniMax M3"
+			meta.Description = "MiniMax M3 via OpenCode Go"
+			meta.InputModalities = []string{"text", "image", "video"}
+			meta.CodexInputModalities = []string{"text", "image"}
+			meta.ContextWindow = 512000
+			meta.MaxContextWindow = 512000
+		case "kimi-k2.6", "kimi-k2.5", "mimo-v2-omni":
+			meta.InputModalities = []string{"text", "image"}
+			meta.CodexInputModalities = []string{"text", "image"}
+		}
+	}
+
+	// ocgo-specific overrides that are always applied (remote API doesn't have them).
 	switch id {
 	case "minimax-m3":
-		meta.DisplayName = "MiniMax M3"
-		meta.Description = "MiniMax M3 via OpenCode Go"
-		meta.InputModalities = []string{"text", "image", "video"}
-		meta.CodexInputModalities = []string{"text", "image"}
-		meta.ContextWindow = 512000
-		meta.MaxContextWindow = 512000
 		meta.UsesAnthropicEndpoint = true
 		meta.ParallelToolCalls = true
 	case "minimax-m2.7", "minimax-m2.5":
@@ -259,11 +356,142 @@ func modelMetadata(model string) openCodeModelMetadata {
 	case "qwen3.7-max":
 		meta.UsesAnthropicEndpoint = true
 		meta.SupportsSearchTool = true
-	case "kimi-k2.6", "kimi-k2.5", "mimo-v2-omni":
-		meta.InputModalities = []string{"text", "image"}
-		meta.CodexInputModalities = []string{"text", "image"}
 	}
 	return meta
+}
+
+// ---- Remote model fetching ----
+
+func fetchRemoteModels() (map[string]remoteModelInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, remoteModelsURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("remote models API returned status %d", resp.StatusCode)
+	}
+
+	var apiResp remoteAPIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("failed to decode remote models: %w", err)
+	}
+
+	return apiResp.OpenCodeGo.Models, nil
+}
+
+// getRemoteModels returns cached remote models, fetching on first call.
+func getRemoteModels() (map[string]remoteModelInfo, error) {
+	remoteMu.RLock()
+	if remoteFetched {
+		d, e := remoteData, remoteErr
+		remoteMu.RUnlock()
+		return d, e
+	}
+	remoteMu.RUnlock()
+
+	remoteMu.Lock()
+	defer remoteMu.Unlock()
+
+	if remoteFetched {
+		return remoteData, remoteErr
+	}
+	remoteData, remoteErr = fetchRemoteModels()
+	remoteFetched = true
+	return remoteData, remoteErr
+}
+
+// refreshRemoteModels forces a fresh fetch from the remote API.
+func refreshRemoteModels() {
+	remoteMu.Lock()
+	remoteFetched = false
+	remoteData = nil
+	remoteErr = nil
+	remoteMu.Unlock()
+	getRemoteModels()
+}
+
+// ---- Official model list (OpenCode Go whitelist) ----
+
+func fetchOfficialModels() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, officialModelsURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("official models API returned status %d", resp.StatusCode)
+	}
+
+	var apiResp officialModelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("failed to decode official models: %w", err)
+	}
+
+	ids := make([]string, 0, len(apiResp.Data))
+	for _, m := range apiResp.Data {
+		if strings.TrimSpace(m.ID) != "" {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids, nil
+}
+
+// getOfficialModels returns cached official model IDs, fetching on first call.
+func getOfficialModels() ([]string, error) {
+	officialMu.RLock()
+	if officialFetched {
+		d, e := officialData, officialErr
+		officialMu.RUnlock()
+		return d, e
+	}
+	officialMu.RUnlock()
+
+	officialMu.Lock()
+	defer officialMu.Unlock()
+
+	if officialFetched {
+		return officialData, officialErr
+	}
+	officialData, officialErr = fetchOfficialModels()
+	officialFetched = true
+	return officialData, officialErr
+}
+
+// refreshAllModels forces a fresh fetch of both official and metadata APIs.
+func refreshAllModels() {
+	remoteMu.Lock()
+	remoteFetched = false
+	remoteData = nil
+	remoteErr = nil
+	remoteMu.Unlock()
+
+	officialMu.Lock()
+	officialFetched = false
+	officialData = nil
+	officialErr = nil
+	officialMu.Unlock()
+
+	getOfficialModels()
+	getRemoteModels()
 }
 
 func defaultModelMappings() map[string]map[string]string {
