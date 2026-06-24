@@ -588,6 +588,124 @@ func TestForwardAnthropicSendsNormalizedBody(t *testing.T) {
 	}
 }
 
+func TestEstimateTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want int
+	}{
+		{"empty", "", 0},
+		{"ascii", "abcd", 1},
+		{"ascii rounds down", "abcdefg", 1},
+		{"cjk counts per rune", "你好", 2},
+		{"mixed", "你好abcd", 3},
+	}
+	for _, c := range cases {
+		if got := estimateTokens(c.text); got != c.want {
+			t.Errorf("%s: estimateTokens(%q) = %d, want %d", c.name, c.text, got, c.want)
+		}
+	}
+}
+
+func TestMergeUsageKeepsExistingFieldsWhenIncomingIsZero(t *testing.T) {
+	a := tokenUsage{Present: true, InputTokens: 10, OutputTokens: 5, CachedInputTokens: 2, CacheWriteTokens: 1, ReasoningTokens: 3}
+	b := tokenUsage{Present: true}
+	got := mergeUsage(a, b)
+	if got.InputTokens != 10 || got.OutputTokens != 5 || got.CachedInputTokens != 2 || got.CacheWriteTokens != 1 || got.ReasoningTokens != 3 {
+		t.Fatalf("mergeUsage zeroed out existing fields: %+v", got)
+	}
+}
+
+func TestMergeUsageOverridesWithNonZeroIncomingFields(t *testing.T) {
+	a := tokenUsage{Present: true, InputTokens: 10, CacheWriteTokens: 1, ReasoningTokens: 3}
+	b := tokenUsage{Present: true, InputTokens: 20, CacheWriteTokens: 7, ReasoningTokens: 9}
+	got := mergeUsage(a, b)
+	if got.InputTokens != 20 || got.CacheWriteTokens != 7 || got.ReasoningTokens != 9 {
+		t.Fatalf("mergeUsage did not apply incoming fields: %+v", got)
+	}
+}
+
+func TestProxyCountTokensEstimatesForNonAnthropicModel(t *testing.T) {
+	body := `{"model":"kimi-k2.6","messages":[{"role":"user","content":"hello world"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	proxyCountTokens(rec, req, Config{APIKey: "test-key"})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		InputTokens int `json:"input_tokens"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out.InputTokens <= 0 {
+		t.Fatalf("expected positive estimated input_tokens, got %d", out.InputTokens)
+	}
+}
+
+func TestProxyCountTokensProxiesToAnthropicUpstream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/count_tokens" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer srv.Close()
+
+	oldURL := anthropicURL
+	anthropicURL = srv.URL
+	defer func() { anthropicURL = oldURL }()
+
+	body := `{"model":"opencode-go/qwen3.7-max","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	proxyCountTokens(rec, req, Config{APIKey: "test-key"})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"input_tokens":42`) {
+		t.Fatalf("expected upstream response to be passed through, got %s", rec.Body.String())
+	}
+}
+
+func TestProxyCountTokensFallsBackOnUpstreamFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	oldURL := anthropicURL
+	anthropicURL = srv.URL
+	defer func() { anthropicURL = oldURL }()
+
+	body := `{"model":"opencode-go/qwen3.7-max","system":"some system rules","messages":[{"role":"user","content":"hello there"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	proxyCountTokens(rec, req, Config{APIKey: "test-key"})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		InputTokens int `json:"input_tokens"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	// estimate must include both system and message text
+	want := estimateTokens(systemText([]byte(`"some system rules"`)) + blockText([]byte(`"hello there"`)) + " ")
+	if out.InputTokens != want {
+		t.Fatalf("input_tokens = %d, want %d (estimate should include system text)", out.InputTokens, want)
+	}
+}
+
 func TestCompareVersions(t *testing.T) {
 	if compareVersions("0.80.9", "0.81.0") >= 0 {
 		t.Fatal("0.80.9 should be older")
