@@ -896,7 +896,7 @@ func runServer(cfg Config) error {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok\n")) })
-	mux.HandleFunc("/v1/messages/count_tokens", countTokens)
+	mux.HandleFunc("/v1/messages/count_tokens", func(w http.ResponseWriter, r *http.Request) { proxyCountTokens(w, r, cfg) })
 	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) { proxyMessages(w, r, cfg) })
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { proxyChatCompletions(w, r, cfg) })
 	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) { proxyResponses(w, r, cfg) })
@@ -1088,19 +1088,23 @@ func copyHeaders(dst, src http.Header) {
 }
 
 func forwardAnthropic(ctx context.Context, cfg Config, ar AnthropicRequest) (*http.Response, error) {
+	return forwardAnthropicTo(ctx, cfg, ar, anthropicURL, 10*time.Minute)
+}
+
+func forwardAnthropicTo(ctx context.Context, cfg Config, ar AnthropicRequest, url string, timeout time.Duration) (*http.Response, error) {
 	normalizeAnthropicRequestForUpstream(&ar)
 	body, err := json.Marshal(ar)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("X-API-Key", cfg.APIKey)
 	req.Header.Set("Anthropic-Version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
-	return (&http.Client{Timeout: 10 * time.Minute}).Do(req)
+	return (&http.Client{Timeout: timeout}).Do(req)
 }
 
 func normalizeAnthropicRequestForUpstream(ar *AnthropicRequest) {
@@ -2253,6 +2257,8 @@ type tokenUsage struct {
 	OutputTokens      int
 	TotalTokens       int
 	CachedInputTokens int
+	CacheWriteTokens  int
+	ReasoningTokens   int
 	Present           bool
 }
 
@@ -2289,6 +2295,12 @@ func mergeUsage(a, b tokenUsage) tokenUsage {
 	if b.CachedInputTokens != 0 {
 		a.CachedInputTokens = b.CachedInputTokens
 	}
+	if b.CacheWriteTokens != 0 {
+		a.CacheWriteTokens = b.CacheWriteTokens
+	}
+	if b.ReasoningTokens != 0 {
+		a.ReasoningTokens = b.ReasoningTokens
+	}
 	if a.TotalTokens == 0 && (a.InputTokens > 0 || a.OutputTokens > 0) {
 		a.TotalTokens = a.InputTokens + a.OutputTokens
 	}
@@ -2313,6 +2325,8 @@ func usageFromFields(fields map[string]any) tokenUsage {
 		u.TotalTokens = u.InputTokens + u.OutputTokens
 	}
 	u.CachedInputTokens = cachedTokens(fields)
+	u.CacheWriteTokens = intField(fields, "cache_creation_input_tokens")
+	u.ReasoningTokens = intField(fields, "reasoning_tokens")
 	return u
 }
 
@@ -2361,21 +2375,27 @@ func cachedTokens(fields map[string]any) int {
 	return intField(fields, "cached_tokens")
 }
 
-func anthropicUsage(u tokenUsage) map[string]int {
-	usage := map[string]int{"input_tokens": u.InputTokens, "output_tokens": u.OutputTokens}
+func anthropicUsage(u tokenUsage) map[string]any {
+	usage := map[string]any{"input_tokens": u.InputTokens, "output_tokens": u.OutputTokens}
 	if u.CachedInputTokens > 0 {
 		usage["cache_read_input_tokens"] = u.CachedInputTokens
+	}
+	if u.CacheWriteTokens > 0 {
+		usage["cache_creation_input_tokens"] = u.CacheWriteTokens
 	}
 	return usage
 }
 
-func anthropicDeltaUsage(u tokenUsage) map[string]int {
-	usage := map[string]int{"output_tokens": u.OutputTokens}
+func anthropicDeltaUsage(u tokenUsage) map[string]any {
+	usage := map[string]any{"output_tokens": u.OutputTokens}
 	if u.InputTokens > 0 {
 		usage["input_tokens"] = u.InputTokens
 	}
 	if u.CachedInputTokens > 0 {
 		usage["cache_read_input_tokens"] = u.CachedInputTokens
+	}
+	if u.CacheWriteTokens > 0 {
+		usage["cache_creation_input_tokens"] = u.CacheWriteTokens
 	}
 	return usage
 }
@@ -2383,7 +2403,18 @@ func anthropicDeltaUsage(u tokenUsage) map[string]int {
 func responsesUsage(u tokenUsage) map[string]any {
 	usage := map[string]any{"input_tokens": u.InputTokens, "output_tokens": u.OutputTokens, "total_tokens": u.TotalTokens}
 	if u.CachedInputTokens > 0 {
-		usage["input_tokens_details"] = map[string]int{"cached_tokens": u.CachedInputTokens}
+		usage["input_tokens_details"] = map[string]any{"cached_tokens": u.CachedInputTokens}
+	}
+	if u.CacheWriteTokens > 0 {
+		details, _ := usage["input_tokens_details"].(map[string]any)
+		if details == nil {
+			details = map[string]any{}
+			usage["input_tokens_details"] = details
+		}
+		details["cache_creation_tokens"] = u.CacheWriteTokens
+	}
+	if u.ReasoningTokens > 0 {
+		usage["reasoning_tokens"] = u.ReasoningTokens
 	}
 	return usage
 }
@@ -2391,7 +2422,18 @@ func responsesUsage(u tokenUsage) map[string]any {
 func openAIUsage(u tokenUsage) map[string]any {
 	usage := map[string]any{"prompt_tokens": u.InputTokens, "completion_tokens": u.OutputTokens, "total_tokens": u.TotalTokens}
 	if u.CachedInputTokens > 0 {
-		usage["prompt_tokens_details"] = map[string]int{"cached_tokens": u.CachedInputTokens}
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": u.CachedInputTokens}
+	}
+	if u.CacheWriteTokens > 0 {
+		details, _ := usage["prompt_tokens_details"].(map[string]any)
+		if details == nil {
+			details = map[string]any{}
+			usage["prompt_tokens_details"] = details
+		}
+		details["cache_creation_tokens"] = u.CacheWriteTokens
+	}
+	if u.ReasoningTokens > 0 {
+		usage["reasoning_tokens"] = u.ReasoningTokens
 	}
 	return usage
 }
@@ -2978,8 +3020,79 @@ func writeResponsesResponse(w http.ResponseWriter, body io.Reader, model string)
 	_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_ocgo", "object": "response", "created_at": time.Now().Unix(), "model": model, "status": "completed", "output": output, "usage": responsesUsage(usageFromJSON(v.Usage))})
 }
 
-func countTokens(w http.ResponseWriter, r *http.Request) {
-	_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": 0})
+func proxyCountTokens(w http.ResponseWriter, r *http.Request, cfg Config) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var ar AnthropicRequest
+	if err := json.NewDecoder(r.Body).Decode(&ar); err != nil {
+		writeEstimatedTokens(w, "")
+		return
+	}
+	estimate := systemText(ar.System) + concatMessages(ar.Messages)
+	if !modelUsesAnthropicEndpoint(ar.Model) {
+		writeEstimatedTokens(w, estimate)
+		return
+	}
+	ar.Model = modelID(ar.Model)
+	resp, err := forwardAnthropicTo(r.Context(), cfg, ar, anthropicURL+"/count_tokens", 10*time.Second)
+	if err == nil && resp.StatusCode == http.StatusOK {
+		defer resp.Body.Close()
+		copyHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+	if resp != nil {
+		resp.Body.Close()
+	}
+	writeEstimatedTokens(w, estimate)
+}
+
+func writeEstimatedTokens(w http.ResponseWriter, text string) {
+	n := estimateTokens(text)
+	if n < 0 {
+		n = 0
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `{"input_tokens":%d}`, n)
+}
+
+func estimateTokens(s string) int {
+	var cjk, other int
+	for _, r := range s {
+		if isCJK(r) {
+			cjk++
+		} else {
+			other++
+		}
+	}
+	return cjk + other/4
+}
+
+func isCJK(r rune) bool {
+	return (0x4E00 <= r && r <= 0x9FFF) ||
+		(0x3400 <= r && r <= 0x4DBF) ||
+		(0x20000 <= r && r <= 0x2A6DF) ||
+		(0x2A700 <= r && r <= 0x2CEAF) ||
+		(0x2F800 <= r && r <= 0x2FA1F) ||
+		(0x3000 <= r && r <= 0x30FF) ||
+		(0x3130 <= r && r <= 0x318F) ||
+		(0xAC00 <= r && r <= 0xD7AF) ||
+		(0x1100 <= r && r <= 0x11FF) ||
+		(0xFF00 <= r && r <= 0xFFEF) ||
+		(0xFE30 <= r && r <= 0xFE4F) ||
+		(0x2E80 <= r && r <= 0x2EFF)
+}
+
+func concatMessages(msgs []AMessage) string {
+	var out string
+	for _, m := range msgs {
+		out += blockText(m.Content) + " "
+	}
+	return out
 }
 
 func ensureServer(base string) error {
