@@ -1140,3 +1140,65 @@ func TestSanitizeRawChatToolMessagesDropsLateToolMessage(t *testing.T) {
 		t.Fatalf("expected assistant after placeholder, got %+v", roles[2])
 	}
 }
+
+func TestSanitizeToolCallDeltaNullsDropsNullIDAndName(t *testing.T) {
+	var chunk map[string]any
+	data := []byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":null,"type":"function","function":{"name":null,"arguments":"{\""}}]}}]}`)
+	if err := json.Unmarshal(data, &chunk); err != nil {
+		t.Fatal(err)
+	}
+	if !sanitizeToolCallDeltaNulls(chunk) {
+		t.Fatal("expected nulls to be removed")
+	}
+	choices := chunk["choices"].([]any)
+	choice := choices[0].(map[string]any)
+	delta := choice["delta"].(map[string]any)
+	calls := delta["tool_calls"].([]any)
+	call := calls[0].(map[string]any)
+	if _, ok := call["id"]; ok {
+		t.Fatalf("id should be removed, got %+v", call)
+	}
+	fn := call["function"].(map[string]any)
+	if _, ok := fn["name"]; ok {
+		t.Fatalf("name should be removed, got %+v", fn)
+	}
+	if args, _ := fn["arguments"].(string); args != `{"` {
+		t.Fatalf("arguments must be preserved, got %q", args)
+	}
+}
+
+func TestSanitizeToolCallDeltaNullsKeepsRealValues(t *testing.T) {
+	var chunk map[string]any
+	data := []byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"bash","arguments":""}}]}}]}`)
+	if err := json.Unmarshal(data, &chunk); err != nil {
+		t.Fatal(err)
+	}
+	if sanitizeToolCallDeltaNulls(chunk) {
+		t.Fatal("expected no changes for populated values")
+	}
+}
+
+func TestStreamChatCompletionsPassthroughPreservesToolIdentityAndDONE(t *testing.T) {
+	body := strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"bash","arguments":""}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":null,"type":"function","function":{"name":null,"arguments":"{\""}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":null,"type":"function","function":{"name":null,"arguments":"ls\"}"}}]}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n"))
+	w := httptest.NewRecorder()
+	streamChatCompletionsPassthrough(w, body)
+	out := w.Body.String()
+	if !strings.Contains(out, `data: [DONE]`) {
+		t.Fatalf("DONE must be forwarded, got:\n%s", out)
+	}
+	if strings.Count(out, `"name":"bash"`) != 1 {
+		t.Fatalf("tool name must appear exactly once, got:\n%s", out)
+	}
+	if strings.Contains(out, `"name":null`) || strings.Contains(out, `"id":null`) {
+		t.Fatalf("null id/name must be dropped, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"arguments":"ls\"}"`) {
+		t.Fatalf("arguments must be preserved, got:\n%s", out)
+	}
+}

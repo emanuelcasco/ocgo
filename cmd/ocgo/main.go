@@ -1015,7 +1015,98 @@ func proxyChatCompletions(w http.ResponseWriter, r *http.Request, cfg Config) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
+	if or.Stream {
+		streamChatCompletionsPassthrough(w, resp.Body)
+		return
+	}
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// streamChatCompletionsPassthrough forwards an upstream OpenAI chat
+// completions SSE stream verbatim, except that it drops null id/name fields
+// from tool_calls argument deltas. Some upstreams emit those nulls, which
+// strict streaming clients (e.g. dsh) use to overwrite the tool identity set
+// on the first tool_calls chunk, producing empty tool names.
+func streamChatCompletionsPassthrough(w http.ResponseWriter, body io.Reader) {
+	flusher, _ := w.(http.Flusher)
+	s := bufio.NewScanner(body)
+	collected := make([]string, 0, 2)
+	flush := func() {
+		if len(collected) == 0 {
+			return
+		}
+		payload := strings.Join(collected, "\n")
+		collected = collected[:0]
+		out := []byte(payload)
+		if payload != "[DONE]" && bytes.Contains(out, []byte("tool_calls")) {
+			var chunk map[string]any
+			if json.Unmarshal(out, &chunk) == nil && sanitizeToolCallDeltaNulls(chunk) {
+				out, _ = json.Marshal(chunk)
+			}
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", out)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	for s.Scan() {
+		line := strings.TrimRight(s.Text(), "\r")
+		if line == "" {
+			flush()
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			collected = append(collected, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	flush()
+}
+
+// sanitizeToolCallDeltaNulls removes id and function.name keys whose values
+// are nil/empty from tool_calls deltas. Returns true if anything changed.
+func sanitizeToolCallDeltaNulls(chunk map[string]any) bool {
+	choices, _ := chunk["choices"].([]any)
+	changed := false
+	for _, c := range choices {
+		choice, _ := c.(map[string]any)
+		if choice == nil {
+			continue
+		}
+		delta, _ := choice["delta"].(map[string]any)
+		if delta == nil {
+			continue
+		}
+		calls, _ := delta["tool_calls"].([]any)
+		for _, ct := range calls {
+			call, _ := ct.(map[string]any)
+			if call == nil {
+				continue
+			}
+			if id, ok := call["id"]; ok {
+				if s, isStr := id.(string); isStr && s == "" {
+					delete(call, "id")
+					changed = true
+				} else if id == nil {
+					delete(call, "id")
+					changed = true
+				}
+			}
+			fn, _ := call["function"].(map[string]any)
+			if fn == nil {
+				continue
+			}
+			if name, ok := fn["name"]; ok {
+				if s, isStr := name.(string); isStr && s == "" {
+					delete(fn, "name")
+					changed = true
+				} else if name == nil {
+					delete(fn, "name")
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
 }
 
 func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
