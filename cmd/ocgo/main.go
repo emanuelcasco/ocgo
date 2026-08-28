@@ -391,6 +391,23 @@ func modelMetadata(model string) openCodeModelMetadata {
 	return meta
 }
 
+// minContextWindow returns the smallest known ContextWindow across models,
+// or 0 if none of them resolve to a known window (the caller then leaves
+// Claude Code's own default in place rather than exporting a bogus 0).
+func minContextWindow(models []string) int {
+	min := 0
+	for _, m := range models {
+		ctx := modelMetadata(m).ContextWindow
+		if ctx <= 0 {
+			continue
+		}
+		if min == 0 || ctx < min {
+			min = ctx
+		}
+	}
+	return min
+}
+
 func codexSupportedModalities(modalities []string) []string {
 	out := make([]string, 0, len(modalities))
 	seen := map[string]bool{}
@@ -750,16 +767,21 @@ func launchCmd() *cobra.Command {
 				"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="+model+" via OCGO",
 				"ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION=OpenCode Go model routed through OCGO",
 			)
+			if ctx := modelMetadata(model).ContextWindow; ctx > 0 {
+				c.Env = append(c.Env, fmt.Sprintf("CLAUDE_CODE_MAX_CONTEXT_TOKENS=%d", ctx))
+			}
 		} else {
 			opus := resolveMappedModel("claude", "claude-opus", mappings)
 			sonnet := resolveMappedModel("claude", "claude-sonnet", mappings)
 			haiku := resolveMappedModel("claude", "claude-haiku", mappings)
+			mapped := []string{}
 			if opus != "claude-opus" {
 				c.Env = append(c.Env,
 					"ANTHROPIC_DEFAULT_OPUS_MODEL="+opus,
 					"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="+opus+" via OCGO",
 					"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION=OpenCode Go model routed through OCGO",
 				)
+				mapped = append(mapped, opus)
 			}
 			if sonnet != "claude-sonnet" {
 				c.Env = append(c.Env,
@@ -767,6 +789,7 @@ func launchCmd() *cobra.Command {
 					"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="+sonnet+" via OCGO",
 					"ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION=OpenCode Go model routed through OCGO",
 				)
+				mapped = append(mapped, sonnet)
 			}
 			if haiku != "claude-haiku" {
 				c.Env = append(c.Env,
@@ -775,6 +798,17 @@ func launchCmd() *cobra.Command {
 					"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION=OpenCode Go model routed through OCGO",
 					"ANTHROPIC_SMALL_FAST_MODEL="+haiku,
 				)
+				mapped = append(mapped, haiku)
+			}
+			// Claude Code has ONE context-window setting for the whole
+			// process, but opus/sonnet/haiku can each be mapped to a
+			// DIFFERENT OpenCode Go model with a different real window -
+			// and Claude Code can switch between them mid-session via
+			// `/model`. Take the smallest of whichever models are actually
+			// mapped: overestimating risks the exact hard-stop this fixes,
+			// underestimating only costs an earlier, harmless /compact.
+			if ctx := minContextWindow(mapped); ctx > 0 {
+				c.Env = append(c.Env, fmt.Sprintf("CLAUDE_CODE_MAX_CONTEXT_TOKENS=%d", ctx))
 			}
 		}
 		printLaunchMapping("claude", mappings["claude"])
