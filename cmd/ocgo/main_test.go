@@ -301,6 +301,39 @@ func TestModelMetadataUsesRemoteFixtureWithoutLiveNetwork(t *testing.T) {
 	}
 }
 
+func TestMinContextWindowTakesTheSmallestMappedModel(t *testing.T) {
+	withModelFetchers(t, map[string]remoteModelInfo{
+		"deepseek-v4-flash": testRemoteModel("DeepSeek V4 Flash", 131072, "text"),
+		"kimi-k2.6":         testRemoteModel("Kimi K2.6", 262144, "text", "image"),
+	}, nil)
+	// Claude Code has ONE context-window setting for the whole process, but
+	// opus/sonnet/haiku can each map to a different model and be switched
+	// between mid-session - the smaller of the two must win, or a session
+	// that starts on Kimi and later switches to DeepSeek would still think
+	// it has Kimi's larger room and overrun DeepSeek's real window.
+	if got := minContextWindow([]string{"kimi-k2.6", "deepseek-v4-flash"}); got != 131072 {
+		t.Fatalf("min context window = %d, want 131072 (DeepSeek's, the smaller one)", got)
+	}
+}
+
+func TestMinContextWindowIgnoresUnknownModelsRatherThanReturningZero(t *testing.T) {
+	withModelFetchers(t, map[string]remoteModelInfo{
+		"deepseek-v4-flash": testRemoteModel("DeepSeek V4 Flash", 131072, "text"),
+	}, nil)
+	// An unresolved model falls back to modelMetadata's generic 128000
+	// default (never 0), so this also confirms minContextWindow does not
+	// let one unknown id in a mapped set zero out the whole result.
+	if got := minContextWindow([]string{"totally-unknown-model", "deepseek-v4-flash"}); got != 128000 {
+		t.Fatalf("min context window = %d, want 128000 (the unknown model's generic default)", got)
+	}
+}
+
+func TestMinContextWindowOfNoModelsIsZero(t *testing.T) {
+	if got := minContextWindow(nil); got != 0 {
+		t.Fatalf("min context window of no models = %d, want 0 so the caller leaves Claude Code's own default alone", got)
+	}
+}
+
 func TestCodexModelCatalogAllowsImagesForKnownVisionModels(t *testing.T) {
 	if !modelSupportsImages("kimi-k2.6") {
 		t.Fatal("kimi-k2.6 should support image inputs")
