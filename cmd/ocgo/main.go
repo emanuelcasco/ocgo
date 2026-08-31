@@ -3298,10 +3298,27 @@ func saveConfig(cfg Config) error {
 }
 
 func loadConfig() (Config, error) {
-	cfg := Config{Host: defaultHost, Port: defaultPort, APIKey: os.Getenv("OCGO_API_KEY")}
+	// Precedence: explicit env var > config file > defaults.
+	//
+	// OCGO_API_KEY used to be seeded as the struct default BEFORE
+	// json.Unmarshal read the config file, so a stale `api_key` in
+	// config.json silently overwrote it -- the exact opposite of what the
+	// README promises ("You can also provide the key at runtime with an
+	// environment variable"). Setting the documented variable and watching
+	// every request still fail `401 Invalid API key`, with no indication
+	// which credential was actually used, is a rough way to lose an hour.
+	//
+	// Reading the file first and letting a non-empty env var win afterwards
+	// matches both the documentation and the usual 12-factor ordering, and
+	// makes it possible to source the key from a secret store at run time
+	// without ever writing it to disk.
+	cfg := Config{Host: defaultHost, Port: defaultPort}
 	b, err := os.ReadFile(configFile())
 	if err == nil {
 		_ = json.Unmarshal(b, &cfg)
+	}
+	if k := strings.TrimSpace(os.Getenv("OCGO_API_KEY")); k != "" {
+		cfg.APIKey = k
 	}
 	if cfg.APIKey == "" {
 		return cfg, errors.New("missing API key; run: ocgo setup")
