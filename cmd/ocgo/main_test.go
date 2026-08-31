@@ -1140,3 +1140,61 @@ func TestSanitizeRawChatToolMessagesDropsLateToolMessage(t *testing.T) {
 		t.Fatalf("expected assistant after placeholder, got %+v", roles[2])
 	}
 }
+
+// writeTempConfig points HOME at a temp dir (configFile() resolves through
+// os.UserHomeDir) and writes a config.json holding fileKey.
+func writeTempConfig(t *testing.T, fileKey string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "ocgo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"api_key":%q,"host":"127.0.0.1","port":3456}`, fileKey)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnvKeyOverridesConfigFile(t *testing.T) {
+	// The regression this pins: OCGO_API_KEY used to be seeded as the struct
+	// default BEFORE the config file was unmarshalled over it, so a stale
+	// api_key silently won and every request failed 401 with no indication
+	// which credential was used -- while the README says the env var works.
+	writeTempConfig(t, "sk-stale-from-file")
+	t.Setenv("OCGO_API_KEY", "sk-fresh-from-env")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIKey != "sk-fresh-from-env" {
+		t.Fatalf("APIKey = %q, want the env var to win over the config file", cfg.APIKey)
+	}
+}
+
+func TestConfigFileUsedWhenEnvUnset(t *testing.T) {
+	writeTempConfig(t, "sk-from-file")
+	t.Setenv("OCGO_API_KEY", "")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIKey != "sk-from-file" {
+		t.Fatalf("APIKey = %q, want the config file value when no env var is set", cfg.APIKey)
+	}
+}
+
+func TestBlankEnvDoesNotClobberConfigFile(t *testing.T) {
+	// An exported-but-empty OCGO_API_KEY (e.g. `export OCGO_API_KEY=` in a
+	// profile) must not blank out a working config file.
+	writeTempConfig(t, "sk-from-file")
+	t.Setenv("OCGO_API_KEY", "   ")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIKey != "sk-from-file" {
+		t.Fatalf("APIKey = %q, want a whitespace-only env var ignored", cfg.APIKey)
+	}
+}
