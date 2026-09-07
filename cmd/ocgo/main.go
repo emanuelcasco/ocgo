@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,54 @@ const (
 	remoteModelsURL   = "https://models.dev/api.json"
 	officialModelsURL = "https://opencode.ai/zen/go/v1/models"
 )
+
+// openCodeSessionHeader is required by OpenCode Go on every model request so it
+// can pin a conversation to one backend and keep prompt caches warm. See
+// https://opencode.ai/docs/go/#where-can-i-use-it.
+const openCodeSessionHeader = "X-OpenCode-Session"
+
+// openCodeAffinityHeaders are inbound headers ocgo accepts as a client-supplied
+// session id. They let a caller keep one scope across a shared proxy; when none
+// is present ocgo falls back to a per-process id.
+var openCodeAffinityHeaders = []string{
+	openCodeSessionHeader,
+	"X-Session-Id",
+	"X-Session-Affinity",
+	"Conversation-Id",
+	"X-Conversation-Id",
+}
+
+// proxySessionID is the opaque id ocgo presents to OpenCode Go. The launched
+// tools (Claude Code, Codex) do not send one of their own, so ocgo mints a
+// single random id for the lifetime of the proxy process; each `ocgo launch`
+// owns its proxy, which scopes the id to one conversation in practice.
+var proxySessionID = newProxySessionID()
+
+func newProxySessionID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err == nil {
+		b[6] = (b[6] & 0x0f) | 0x40 // version 4
+		b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+		return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	}
+	return fmt.Sprintf("ocgo-%d-%d", time.Now().UnixNano(), os.Getpid())
+}
+
+// applyOpenCodeSessionHeaders stamps an x-opencode-session header onto an
+// outbound request. A non-empty client-supplied affinity header wins so a
+// conversation keeps one id even across proxy restarts; otherwise the
+// per-process id is used. The header is never left empty.
+func applyOpenCodeSessionHeaders(dst http.Header, src http.Header) {
+	for _, name := range openCodeAffinityHeaders {
+		if v := strings.TrimSpace(src.Get(name)); v != "" {
+			dst.Set(openCodeSessionHeader, v)
+			return
+		}
+	}
+	if strings.TrimSpace(dst.Get(openCodeSessionHeader)) == "" {
+		dst.Set(openCodeSessionHeader, proxySessionID)
+	}
+}
 
 // officialModelsResponse matches the OpenCode Go /v1/models response shape.
 type officialModelsResponse struct {
@@ -918,7 +967,7 @@ func proxyMessages(w http.ResponseWriter, r *http.Request, cfg Config) {
 	if modelUsesAnthropicEndpoint(ar.Model) {
 		ar.Model = modelID(ar.Model)
 		ensureAnthropicRequestDefaults(&ar)
-		resp, err := forwardAnthropic(r.Context(), cfg, ar)
+		resp, err := forwardAnthropic(r.Context(), cfg, ar, r.Header)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -942,6 +991,7 @@ func proxyMessages(w http.ResponseWriter, r *http.Request, cfg Config) {
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
+	applyOpenCodeSessionHeaders(req.Header, r.Header)
 	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -982,7 +1032,7 @@ func proxyChatCompletions(w http.ResponseWriter, r *http.Request, cfg Config) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		resp, err := forwardAnthropic(r.Context(), cfg, chatToAnthropic(or))
+		resp, err := forwardAnthropic(r.Context(), cfg, chatToAnthropic(or), r.Header)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -1007,6 +1057,7 @@ func proxyChatCompletions(w http.ResponseWriter, r *http.Request, cfg Config) {
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
+	applyOpenCodeSessionHeaders(req.Header, r.Header)
 	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -1035,7 +1086,7 @@ func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
 	}
 	if modelUsesAnthropicEndpoint(or.Model) {
 		or.Model = modelID(or.Model)
-		resp, err := forwardAnthropic(r.Context(), cfg, chatToAnthropic(or))
+		resp, err := forwardAnthropic(r.Context(), cfg, chatToAnthropic(or), r.Header)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -1061,6 +1112,7 @@ func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
+	applyOpenCodeSessionHeaders(req.Header, r.Header)
 	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -1087,7 +1139,7 @@ func copyHeaders(dst, src http.Header) {
 	}
 }
 
-func forwardAnthropic(ctx context.Context, cfg Config, ar AnthropicRequest) (*http.Response, error) {
+func forwardAnthropic(ctx context.Context, cfg Config, ar AnthropicRequest, inbound http.Header) (*http.Response, error) {
 	normalizeAnthropicRequestForUpstream(&ar)
 	body, err := json.Marshal(ar)
 	if err != nil {
@@ -1100,6 +1152,7 @@ func forwardAnthropic(ctx context.Context, cfg Config, ar AnthropicRequest) (*ht
 	req.Header.Set("X-API-Key", cfg.APIKey)
 	req.Header.Set("Anthropic-Version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
+	applyOpenCodeSessionHeaders(req.Header, inbound)
 	return (&http.Client{Timeout: 10 * time.Minute}).Do(req)
 }
 

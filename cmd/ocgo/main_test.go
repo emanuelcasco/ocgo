@@ -548,6 +548,11 @@ func TestForwardAnthropicSendsNormalizedBody(t *testing.T) {
 		if r.Header.Get("X-API-Key") != "test-key" {
 			t.Fatalf("missing API key header: %q", r.Header.Get("X-API-Key"))
 		}
+		if v := r.Header.Get("X-OpenCode-Session"); v == "" {
+			t.Fatal("missing X-OpenCode-Session header")
+		} else if v != proxySessionID {
+			t.Fatalf("X-OpenCode-Session = %q, want proxy fallback %q", v, proxySessionID)
+		}
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -573,7 +578,7 @@ func TestForwardAnthropicSendsNormalizedBody(t *testing.T) {
 		System:    []byte(`[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}]`),
 		Messages:  []AMessage{{Role: "user", Content: []byte(`[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}},{"type":"thinking","thinking":"private","signature":"abc"}]`)}},
 		MaxTokens: 1000,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1138,5 +1143,57 @@ func TestSanitizeRawChatToolMessagesDropsLateToolMessage(t *testing.T) {
 	}
 	if roles[2].Role != "assistant" || roles[2].Content != "done" {
 		t.Fatalf("expected assistant after placeholder, got %+v", roles[2])
+	}
+}
+
+func TestApplyOpenCodeSessionHeadersFallsBackToProxyID(t *testing.T) {
+	dst := http.Header{}
+	applyOpenCodeSessionHeaders(dst, http.Header{})
+	if got := dst.Get("X-OpenCode-Session"); got == "" {
+		t.Fatal("expected non-empty fallback session header")
+	} else if got != proxySessionID {
+		t.Fatalf("fallback session = %q, want %q", got, proxySessionID)
+	}
+}
+
+func TestApplyOpenCodeSessionHeadersKeepsExisting(t *testing.T) {
+	dst := http.Header{}
+	dst.Set("X-OpenCode-Session", "pre-set")
+	applyOpenCodeSessionHeaders(dst, http.Header{})
+	if got := dst.Get("X-OpenCode-Session"); got != "pre-set" {
+		t.Fatalf("session = %q, want existing value preserved", got)
+	}
+}
+
+func TestApplyOpenCodeSessionHeadersPrefersInboundScope(t *testing.T) {
+	src := http.Header{}
+	src.Set("X-OpenCode-Session", "client-abc")
+	dst := http.Header{}
+	applyOpenCodeSessionHeaders(dst, src)
+	if got := dst.Get("X-OpenCode-Session"); got != "client-abc" {
+		t.Fatalf("session = %q, want inbound value", got)
+	}
+}
+
+func TestApplyOpenCodeSessionHeadersAcceptsAffinityAliases(t *testing.T) {
+	for _, name := range []string{"X-Session-Id", "X-Session-Affinity", "Conversation-Id", "X-Conversation-Id"} {
+		src := http.Header{}
+		src.Set(name, "alias-1")
+		dst := http.Header{}
+		applyOpenCodeSessionHeaders(dst, src)
+		if got := dst.Get("X-OpenCode-Session"); got != "alias-1" {
+			t.Fatalf("%s: session = %q, want alias value", name, got)
+		}
+	}
+}
+
+func TestNewProxySessionIDIsNonEmptyAndUnique(t *testing.T) {
+	a := newProxySessionID()
+	b := newProxySessionID()
+	if a == "" || b == "" {
+		t.Fatal("expected non-empty session ids")
+	}
+	if a == b {
+		t.Fatalf("expected distinct ids, got %q twice", a)
 	}
 }
