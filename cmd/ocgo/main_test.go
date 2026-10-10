@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"ocgo/internal/responses"
 )
 
 func TestMain(m *testing.M) {
@@ -340,8 +342,13 @@ func TestAnthropicEndpointModels(t *testing.T) {
 }
 
 func TestChatToAnthropicForCodexModel(t *testing.T) {
-	or := responsesToChat(ResponsesRequest{Model: "qwen3.7-max", Stream: true, Input: []byte(`[{"type":"message","role":"user","content":"hello"}]`), Tools: []ResponseTool{{Type: "function", Name: "shell", Description: "run", Parameters: []byte(`{"type":"object"}`)}}})
-	ar := chatToAnthropic(or)
+	req, err := responses.Decode([]byte(`{"model":"qwen3.7-max","stream":true,"input":[{"type":"message","role":"user","content":"hello"}],"tools":[{"type":"function","name":"shell","description":"run","parameters":{"type":"object"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat := req.ToChat()
+	chat.Model = req.Model
+	ar := chatToAnthropic(chatToOAI(chat))
 	if ar.Model != "qwen3.7-max" || !ar.Stream || ar.MaxTokens == 0 {
 		t.Fatalf("bad anthropic request metadata: %+v", ar)
 	}
@@ -349,55 +356,6 @@ func TestChatToAnthropicForCodexModel(t *testing.T) {
 		t.Fatalf("bad anthropic messages: %+v", ar.Messages)
 	}
 	if len(ar.Tools) != 1 || ar.Tools[0].Name != "shell" {
-		t.Fatalf("bad anthropic tools: %+v", ar.Tools)
-	}
-}
-
-func TestResponsesToChatMapsBuiltInWebToolsForAnthropicModels(t *testing.T) {
-	or := responsesToChat(ResponsesRequest{
-		Model:  "qwen3.7-max",
-		Input:  []byte(`[{"type":"message","role":"user","content":"search the web"}]`),
-		Tools:  []ResponseTool{{Type: "web_search_preview"}, {Type: "web_search"}, {Type: "web_extractor"}, {Type: "function", Name: "shell", Parameters: []byte(`{"type":"object"}`)}},
-		Stream: true,
-	})
-	if len(or.AnthropicTools) != 2 {
-		t.Fatalf("expected web search and fetch anthropic tools, got %+v", or.AnthropicTools)
-	}
-	ar := chatToAnthropic(or)
-	if len(ar.Tools) != 3 {
-		t.Fatalf("expected 2 built-in tools plus shell, got %+v", ar.Tools)
-	}
-	if ar.Tools[0].Type != "web_search_20250305" || ar.Tools[0].Name != "web_search" {
-		t.Fatalf("bad web search tool mapping: %+v", ar.Tools[0])
-	}
-	if ar.Tools[1].Type != "web_fetch_20250910" || ar.Tools[1].Name != "web_fetch" {
-		t.Fatalf("bad web fetch tool mapping: %+v", ar.Tools[1])
-	}
-	if ar.Tools[2].Type != "" || ar.Tools[2].Name != "shell" {
-		t.Fatalf("bad function tool mapping: %+v", ar.Tools[2])
-	}
-}
-
-func TestResponsesToChatSkipsEmptyToolNamesAndDefaultsParameters(t *testing.T) {
-	or := responsesToChat(ResponsesRequest{
-		Model: "minimax-m2.7",
-		Input: []byte(`[{"type":"message","role":"user","content":"hello"}]`),
-		Tools: []ResponseTool{
-			{Type: "function", Name: ""},
-			{Type: "function", Name: "shell"},
-		},
-	})
-	if len(or.Tools) != 1 {
-		t.Fatalf("expected one valid tool, got %+v", or.Tools)
-	}
-	if or.Tools[0].Function.Name != "shell" {
-		t.Fatalf("bad tool name: %+v", or.Tools[0])
-	}
-	if string(or.Tools[0].Function.Parameters) != `{"type":"object","properties":{}}` {
-		t.Fatalf("bad default params: %s", string(or.Tools[0].Function.Parameters))
-	}
-	ar := chatToAnthropic(or)
-	if len(ar.Tools) != 1 || ar.Tools[0].Name != "shell" || string(ar.Tools[0].InputSchema) != `{"type":"object","properties":{}}` {
 		t.Fatalf("bad anthropic tools: %+v", ar.Tools)
 	}
 }
@@ -603,35 +561,6 @@ func TestCompareVersions(t *testing.T) {
 	}
 }
 
-func TestResponsesInputToMessages(t *testing.T) {
-	messages := responsesInputToMessages([]byte(`[{"type":"message","role":"developer","content":"rules"},{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]`))
-	if len(messages) != 2 {
-		t.Fatalf("got %d messages", len(messages))
-	}
-	if messages[0].Role != "system" || messages[0].Content != "rules" {
-		t.Fatalf("bad developer conversion: %+v", messages[0])
-	}
-	if messages[1].Role != "user" || messages[1].Content != "hello" {
-		t.Fatalf("bad user conversion: %+v", messages[1])
-	}
-}
-
-func TestResponsesInputFunctionCallUsesCallID(t *testing.T) {
-	messages := responsesInputToMessages([]byte(`[{"type":"function_call","id":"fc_123","call_id":"call_123","name":"shell","arguments":"{\"cmd\":\"pwd\"}"},{"type":"function_call_output","call_id":"call_123","output":"/tmp"}]`))
-	if len(messages) != 2 {
-		t.Fatalf("got %d messages", len(messages))
-	}
-	if messages[0].ToolCalls[0].ID != "call_123" {
-		t.Fatalf("tool call ID should match call_id for follow-up tool output: %+v", messages[0].ToolCalls[0])
-	}
-	if messages[0].ReasoningContent == "" {
-		t.Fatalf("assistant tool call history should include fallback reasoning_content: %+v", messages[0])
-	}
-	if messages[1].ToolCallID != "call_123" {
-		t.Fatalf("bad tool output ID: %+v", messages[1])
-	}
-}
-
 func TestAnthropicToolUseHistoryIncludesFallbackReasoning(t *testing.T) {
 	messages := contentToOpenAI(AMessage{Role: "assistant", Content: []byte(`[{"type":"tool_use","id":"call_123","name":"Bash","input":{"command":"pwd"}}]`)})
 	if len(messages) != 1 {
@@ -655,42 +584,6 @@ func TestAnthropicToolResultPreservesFollowingUserText(t *testing.T) {
 	}
 	if messages[1].Role != "user" || !strings.Contains(contentString(messages[1].Content), "figma.example") {
 		t.Fatalf("following user text was not preserved: %+v", messages[1])
-	}
-}
-
-func TestResponsesInputPreservesImages(t *testing.T) {
-	messages := responsesInputToMessages([]byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"describe this"},{"type":"input_image","image_url":"data:image/png;base64,abc","detail":"high"}]}]`))
-	if len(messages) != 1 {
-		t.Fatalf("got %d messages", len(messages))
-	}
-	parts, ok := messages[0].Content.([]OAIContentPart)
-	if !ok {
-		t.Fatalf("content should be multimodal parts: %+v", messages[0].Content)
-	}
-	if len(parts) != 2 || parts[0].Type != "text" || parts[0].Text != "describe this" {
-		t.Fatalf("bad text part: %+v", parts)
-	}
-	if parts[1].Type != "image_url" || parts[1].ImageURL == nil || parts[1].ImageURL.URL != "data:image/png;base64,abc" || parts[1].ImageURL.Detail != "" {
-		t.Fatalf("bad image part: %+v", parts[1])
-	}
-}
-
-func TestResponsesImageKeepsKimiModel(t *testing.T) {
-	req := ResponsesRequest{Model: "kimi-k2.6", Input: []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"describe this"},{"type":"input_image","image_url":"data:image/png;base64,abc"}]}]`)}
-	out := responsesToChat(req)
-	if out.Model != "kimi-k2.6" {
-		t.Fatalf("image request should keep Kimi model, got %q", out.Model)
-	}
-	if err := validateImageSupport(out); err != nil {
-		t.Fatalf("Kimi image request should validate: %v", err)
-	}
-}
-
-func TestResponsesImageRejectsUnsupportedModel(t *testing.T) {
-	req := ResponsesRequest{Model: "deepseek-v4-pro", Input: []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"describe this"},{"type":"input_image","image_url":"data:image/png;base64,abc"}]}]`)}
-	out := responsesToChat(req)
-	if err := validateImageSupport(out); err == nil || !strings.Contains(err.Error(), "deepseek-v4-pro") {
-		t.Fatalf("DeepSeek image request should be rejected, got %v", err)
 	}
 }
 
@@ -794,13 +687,15 @@ func TestConvertedStreamingRequestsAskForUsage(t *testing.T) {
 	if anthropic.StreamOptions == nil || !anthropic.StreamOptions.IncludeUsage {
 		t.Fatalf("anthropic conversion should request stream usage: %+v", anthropic.StreamOptions)
 	}
-	responses := responsesToChat(ResponsesRequest{Model: "kimi-k2.6", Stream: true, Input: []byte(`"hello"`)})
-	if responses.StreamOptions == nil || !responses.StreamOptions.IncludeUsage {
-		t.Fatalf("responses conversion should request stream usage: %+v", responses.StreamOptions)
+	if req, err := responses.Decode([]byte(`{"model":"kimi-k2.6","stream":true,"input":"hello"}`)); err != nil {
+		t.Fatal(err)
+	} else if chat := req.ToChat(); chat.StreamOptions == nil || !chat.StreamOptions.IncludeUsage {
+		t.Fatalf("responses conversion should request stream usage: %+v", chat.StreamOptions)
 	}
-	plain := responsesToChat(ResponsesRequest{Model: "kimi-k2.6", Input: []byte(`"hello"`)})
-	if plain.StreamOptions != nil {
-		t.Fatalf("non-streaming conversion should not set stream options: %+v", plain.StreamOptions)
+	if req, err := responses.Decode([]byte(`{"model":"kimi-k2.6","input":"hello"}`)); err != nil {
+		t.Fatal(err)
+	} else if chat := req.ToChat(); chat.StreamOptions != nil {
+		t.Fatalf("non-streaming conversion should not set stream options: %+v", chat.StreamOptions)
 	}
 }
 
@@ -809,9 +704,8 @@ func TestConvertedRequestsForwardReasoningEffort(t *testing.T) {
 	if anthropic.ReasoningEffort != "high" {
 		t.Fatalf("anthropic reasoning effort = %q, want high", anthropic.ReasoningEffort)
 	}
-	responses := responsesToChat(ResponsesRequest{Model: "glm-5.1", OutputConfig: []byte(`{"reasoning":{"depth":2}}`), Input: []byte(`[{"type":"message","role":"user","content":"hello"}]`)})
-	if responses.ReasoningEffort != "medium" {
-		t.Fatalf("responses reasoning effort = %q, want medium", responses.ReasoningEffort)
+	if effort := downstreamReasoningEffort([]byte(`{"reasoning":{"depth":2}}`)); effort != "medium" {
+		t.Fatalf("responses reasoning effort = %q, want medium", effort)
 	}
 }
 
@@ -898,37 +792,6 @@ func TestWriteAnthropicResponseIncludesUsage(t *testing.T) {
 	}
 }
 
-func TestWriteResponsesResponseIncludesUsage(t *testing.T) {
-	body := strings.NewReader(`{"choices":[{"message":{"content":"done"}}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10,"input_tokens_details":{"cached_tokens":2}}}`)
-	w := httptest.NewRecorder()
-	writeResponsesResponse(w, body, "kimi-k2.6")
-	var out map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
-		t.Fatal(err)
-	}
-	usage, ok := out["usage"].(map[string]any)
-	if !ok {
-		t.Fatalf("missing usage: %+v", out)
-	}
-	if usage["input_tokens"] != float64(7) || usage["output_tokens"] != float64(3) || usage["total_tokens"] != float64(10) {
-		t.Fatalf("bad responses usage: %+v", usage)
-	}
-	details, ok := usage["input_tokens_details"].(map[string]any)
-	if !ok || details["cached_tokens"] != float64(2) {
-		t.Fatalf("bad cached details: %+v", usage["input_tokens_details"])
-	}
-}
-
-func TestParseOpenAIStreamChunkReadsUsageOnly(t *testing.T) {
-	chunk := parseOpenAIStreamChunk([]byte(`{"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}`))
-	if !chunk.Usage.Present || chunk.Usage.InputTokens != 8 || chunk.Usage.OutputTokens != 4 || chunk.Usage.TotalTokens != 12 {
-		t.Fatalf("bad stream usage: %+v", chunk.Usage)
-	}
-	if chunk.Content != "" || len(chunk.ToolCalls) != 0 {
-		t.Fatalf("usage-only chunk should not include deltas: %+v", chunk)
-	}
-}
-
 func TestStreamAnthropicIncludesFinalUsage(t *testing.T) {
 	body := strings.NewReader(strings.Join([]string{
 		`data: {"choices":[{"delta":{"content":"hi"}}]}`,
@@ -946,27 +809,7 @@ func TestStreamAnthropicIncludesFinalUsage(t *testing.T) {
 	}
 }
 
-func TestStreamResponsesIncludesCompletedUsage(t *testing.T) {
-	body := strings.NewReader(strings.Join([]string{
-		`data: {"choices":[{"delta":{"content":"hi"}}]}`,
-		`data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`,
-		`data: [DONE]`,
-		``,
-	}, "\n\n"))
-	w := httptest.NewRecorder()
-	streamResponses(w, body, "kimi-k2.6")
-	out := w.Body.String()
-	for _, want := range []string{`event: response.completed`, `"input_tokens":7`, `"output_tokens":3`, `"total_tokens":10`} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("missing %q in:\n%s", want, out)
-		}
-	}
-}
-
 func TestStreamAnthropicForwardsToolCalls(t *testing.T) {
-	reasoningContentCache.Lock()
-	reasoningContentCache.byCallID = map[string]string{}
-	reasoningContentCache.Unlock()
 	body := strings.NewReader(strings.Join([]string{
 		`data: {"choices":[{"delta":{"reasoning_content":"Need pwd.","tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"Bash","arguments":"{\"command\":"}}]}}]}`,
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"pwd\"}"}}]}}]}`,
@@ -986,96 +829,6 @@ func TestStreamAnthropicForwardsToolCalls(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
-	}
-	messages := responsesInputToMessages([]byte(`[{"type":"function_call","call_id":"call_abc","name":"Bash","arguments":"{\"command\":\"pwd\"}"},{"type":"function_call_output","call_id":"call_abc","output":"/tmp"}]`))
-	if messages[0].ReasoningContent != "Need pwd." {
-		t.Fatalf("missing cached reasoning content: %+v", messages[0])
-	}
-}
-
-func TestStreamResponsesForwardsToolCalls(t *testing.T) {
-	reasoningContentCache.Lock()
-	reasoningContentCache.byCallID = map[string]string{}
-	reasoningContentCache.Unlock()
-	body := strings.NewReader(strings.Join([]string{
-		`data: {"choices":[{"delta":{"reasoning_content":"I should call the tool.","tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"shell","arguments":"{\"cmd\":"}}]}}]}`,
-		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"pwd\"}"}}]}}]}`,
-		`data: [DONE]`,
-		``,
-	}, "\n\n"))
-	w := httptest.NewRecorder()
-	streamResponses(w, body, "deepseek-v4-flash")
-	out := w.Body.String()
-	for _, want := range []string{
-		"event: response.output_item.added",
-		`"type":"function_call"`,
-		"event: response.function_call_arguments.delta",
-		"event: response.function_call_arguments.done",
-		`"arguments":"{\"cmd\":\"pwd\"}"`,
-		"event: response.completed",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("missing %q in:\n%s", want, out)
-		}
-	}
-	if strings.Contains(out, "response.output_text.delta") {
-		t.Fatalf("tool-only stream should not emit text deltas:\n%s", out)
-	}
-	messages := responsesInputToMessages([]byte(`[{"type":"function_call","call_id":"call_abc","name":"shell","arguments":"{\"cmd\":\"pwd\"}"},{"type":"function_call_output","call_id":"call_abc","output":"/tmp"}]`))
-	if messages[0].ReasoningContent != "I should call the tool." {
-		t.Fatalf("missing cached reasoning content: %+v", messages[0])
-	}
-}
-
-func TestSanitizeOAIToolMessagesInsertsMissingBeforeNextMessage(t *testing.T) {
-	in := []OAIMessage{
-		{Role: "user", Content: "run pwd"},
-		{Role: "assistant", ToolCalls: []OAIToolCall{{ID: "call_missing", Type: "function", Function: OAICallFunction{Name: "Bash"}}}},
-		{Role: "assistant", Content: "done"},
-	}
-	out := sanitizeOAIToolMessages(in)
-	if len(out) != 4 {
-		t.Fatalf("expected placeholder insertion, got %+v", out)
-	}
-	if out[2].Role != "tool" || out[2].ToolCallID != "call_missing" || out[2].Content != unavailableToolResultContent {
-		t.Fatalf("bad placeholder at index 2: %+v", out[2])
-	}
-}
-
-func TestSanitizeOAIToolMessagesDropsLateToolMessage(t *testing.T) {
-	in := []OAIMessage{
-		{Role: "assistant", ToolCalls: []OAIToolCall{{ID: "call_1", Type: "function", Function: OAICallFunction{Name: "Bash"}}}},
-		{Role: "assistant", Content: "done"},
-		{Role: "tool", ToolCallID: "call_1", Content: "late result"},
-	}
-	out := sanitizeOAIToolMessages(in)
-	if len(out) != 3 {
-		t.Fatalf("expected placeholder plus assistant only, got %+v", out)
-	}
-	if out[1].Role != "tool" || out[1].ToolCallID != "call_1" || out[1].Content != unavailableToolResultContent {
-		t.Fatalf("expected placeholder before next assistant, got %+v", out[1])
-	}
-	if out[2].Role != "assistant" || out[2].Content != "done" {
-		t.Fatalf("assistant message not preserved after placeholder: %+v", out[2])
-	}
-}
-
-func TestSanitizeOAIToolMessagesPreservesValidConsecutiveResults(t *testing.T) {
-	in := []OAIMessage{
-		{Role: "assistant", ToolCalls: []OAIToolCall{
-			{ID: "call_a", Type: "function", Function: OAICallFunction{Name: "Bash"}},
-			{ID: "call_b", Type: "function", Function: OAICallFunction{Name: "Read"}},
-		}},
-		{Role: "tool", ToolCallID: "call_b", Content: "b"},
-		{Role: "tool", ToolCallID: "call_a", Content: "a"},
-		{Role: "user", Content: "thanks"},
-	}
-	out := sanitizeOAIToolMessages(in)
-	if len(out) != len(in) {
-		t.Fatalf("valid sequence should remain same length, got %+v", out)
-	}
-	if out[1].Content != "b" || out[2].Content != "a" {
-		t.Fatalf("existing tool result order should be preserved: %+v", out)
 	}
 }
 

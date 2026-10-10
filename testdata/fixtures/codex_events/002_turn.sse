@@ -1,0 +1,83 @@
+event: response.created
+data: {"response":{"created_at":1791632575,"id":"resp_8f14f3accf223588b3497baa","model":"glm-5.3-flash","object":"response","output":[],"status":"in_progress"},"sequence_number":1,"type":"response.created"}
+
+event: response.in_progress
+data: {"response":{"created_at":1791632575,"id":"resp_8f14f3accf223588b3497baa","model":"glm-5.3-flash","object":"response","output":[],"status":"in_progress"},"sequence_number":2,"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"arguments":"","call_id":"call_mock_1","id":"call_mock_1","name":"exec_command","status":"in_progress","type":"function_call"},"output_index":0,"sequence_number":3,"type":"response.output_item.added"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"{\"cmd\":","item_id":"call_mock_1","output_index":0,"sequence_number":4,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"\"python","item_id":"call_mock_1","output_index":0,"sequence_number":5,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"3 - \\u0","item_id":"call_mock_1","output_index":0,"sequence_number":6,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"03c\\u00","item_id":"call_mock_1","output_index":0,"sequence_number":7,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"3c'PY'\\","item_id":"call_mock_1","output_index":0,"sequence_number":8,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"nimport","item_id":"call_mock_1","output_index":0,"sequence_number":9,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":" pathli","item_id":"call_mock_1","output_index":0,"sequence_number":10,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"b\\np = ","item_id":"call_mock_1","output_index":0,"sequence_number":11,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"pathlib","item_id":"call_mock_1","output_index":0,"sequence_number":12,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":".Path('","item_id":"call_mock_1","output_index":0,"sequence_number":13,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"calc.py","item_id":"call_mock_1","output_index":0,"sequence_number":14,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"')\\np.w","item_id":"call_mock_1","output_index":0,"sequence_number":15,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"rite_te","item_id":"call_mock_1","output_index":0,"sequence_number":16,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"xt(p.re","item_id":"call_mock_1","output_index":0,"sequence_number":17,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"ad_text","item_id":"call_mock_1","output_index":0,"sequence_number":18,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"().repl","item_id":"call_mock_1","output_index":0,"sequence_number":19,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"ace('a ","item_id":"call_mock_1","output_index":0,"sequence_number":20,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"- b', '","item_id":"call_mock_1","output_index":0,"sequence_number":21,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"a + b')","item_id":"call_mock_1","output_index":0,"sequence_number":22,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":")\\nPY\\n","item_id":"call_mock_1","output_index":0,"sequence_number":23,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"cat cal","item_id":"call_mock_1","output_index":0,"sequence_number":24,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"c.py\"}","item_id":"call_mock_1","output_index":0,"sequence_number":25,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.done
+data: {"arguments":"{\"cmd\":\"python3 - \\u003c\\u003c'PY'\\nimport pathlib\\np = pathlib.Path('calc.py')\\np.write_text(p.read_text().replace('a - b', 'a + b'))\\nPY\\ncat calc.py\"}","item_id":"call_mock_1","output_index":0,"sequence_number":26,"type":"response.function_call_arguments.done"}
+
+event: response.output_item.done
+data: {"item":{"arguments":"{\"cmd\":\"python3 - \\u003c\\u003c'PY'\\nimport pathlib\\np = pathlib.Path('calc.py')\\np.write_text(p.read_text().replace('a - b', 'a + b'))\\nPY\\ncat calc.py\"}","call_id":"call_mock_1","id":"call_mock_1","name":"exec_command","status":"completed","type":"function_call"},"output_index":0,"sequence_number":27,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"created_at":1791632575,"id":"resp_8f14f3accf223588b3497baa","model":"glm-5.3-flash","object":"response","output":[{"arguments":"{\"cmd\":\"python3 - \\u003c\\u003c'PY'\\nimport pathlib\\np = pathlib.Path('calc.py')\\np.write_text(p.read_text().replace('a - b', 'a + b'))\\nPY\\ncat calc.py\"}","call_id":"call_mock_1","id":"call_mock_1","name":"exec_command","status":"completed","type":"function_call"}],"status":"completed","usage":{"input_tokens":1200,"input_tokens_details":{"cached_tokens":1024},"output_tokens":45,"total_tokens":1245}},"sequence_number":28,"type":"response.completed"}

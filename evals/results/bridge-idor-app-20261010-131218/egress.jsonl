@@ -1,0 +1,11 @@
+{"ts":"2026-10-10T12:12:27.010029071Z","host":"github.com","port":443,"method":"CONNECT","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T12:12:27.019816371Z","host":"chatgpt.com","port":443,"method":"CONNECT","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T12:12:27.119215771Z","host":"api.github.com","port":443,"method":"CONNECT","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T12:12:27.133935171Z","host":"chatgpt.com","port":443,"method":"CONNECT","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T12:12:27.285523571Z","host":"127.0.0.1","port":3456,"method":"POST","allowed":true}
+{"ts":"2026-10-10T12:12:28.932867167Z","host":"127.0.0.1","port":8901,"method":"GET","allowed":true}
+{"ts":"2026-10-10T12:12:28.942500967Z","host":"127.0.0.1","port":8901,"method":"GET","allowed":true}
+{"ts":"2026-10-10T12:12:28.974455767Z","host":"127.0.0.1","port":3456,"method":"POST","allowed":true}
+{"ts":"2026-10-10T12:12:29.237289067Z","host":"127.0.0.1","port":8901,"method":"GET","allowed":true}
+{"ts":"2026-10-10T12:12:29.272241066Z","host":"127.0.0.1","port":3456,"method":"POST","allowed":true}
+{"ts":"2026-10-10T12:12:29.334237166Z","host":"ab.chatgpt.com","port":443,"method":"CONNECT","allowed":false,"reason":"not listed in scope"}

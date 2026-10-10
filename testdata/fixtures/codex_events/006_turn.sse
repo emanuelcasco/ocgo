@@ -1,0 +1,35 @@
+event: response.created
+data: {"response":{"created_at":1791632802,"id":"resp_7348f1e4b03789362bad7d48","model":"glm-5.3-flash","object":"response","output":[],"status":"in_progress"},"sequence_number":1,"type":"response.created"}
+
+event: response.in_progress
+data: {"response":{"created_at":1791632802,"id":"resp_7348f1e4b03789362bad7d48","model":"glm-5.3-flash","object":"response","output":[],"status":"in_progress"},"sequence_number":2,"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"arguments":"","call_id":"call_mock_1","id":"call_mock_1","name":"exec_command","status":"in_progress","type":"function_call"},"output_index":0,"sequence_number":3,"type":"response.output_item.added"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"{\"cmd\":","item_id":"call_mock_1","output_index":0,"sequence_number":4,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"\"echo t","item_id":"call_mock_1","output_index":0,"sequence_number":5,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"urn-2 \\","item_id":"call_mock_1","output_index":0,"sequence_number":6,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"u0026\\u","item_id":"call_mock_1","output_index":0,"sequence_number":7,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"0026 ls","item_id":"call_mock_1","output_index":0,"sequence_number":8,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":" -la\"}","item_id":"call_mock_1","output_index":0,"sequence_number":9,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.done
+data: {"arguments":"{\"cmd\":\"echo turn-2 \\u0026\\u0026 ls -la\"}","item_id":"call_mock_1","output_index":0,"sequence_number":10,"type":"response.function_call_arguments.done"}
+
+event: response.output_item.done
+data: {"item":{"arguments":"{\"cmd\":\"echo turn-2 \\u0026\\u0026 ls -la\"}","call_id":"call_mock_1","id":"call_mock_1","name":"exec_command","status":"completed","type":"function_call"},"output_index":0,"sequence_number":11,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"created_at":1791632802,"id":"resp_7348f1e4b03789362bad7d48","model":"glm-5.3-flash","object":"response","output":[{"arguments":"{\"cmd\":\"echo turn-2 \\u0026\\u0026 ls -la\"}","call_id":"call_mock_1","id":"call_mock_1","name":"exec_command","status":"completed","type":"function_call"}],"status":"completed","usage":{"input_tokens":960000,"input_tokens_details":{"cached_tokens":1024},"output_tokens":45,"total_tokens":960045}},"sequence_number":12,"type":"response.completed"}
