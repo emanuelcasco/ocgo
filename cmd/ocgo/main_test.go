@@ -503,6 +503,9 @@ func TestNormalizeQwenAnthropicRequestThinkingVariants(t *testing.T) {
 func TestForwardAnthropicSendsNormalizedBody(t *testing.T) {
 	var forwarded string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/anthropic/v1/messages" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
 		if r.Header.Get("X-API-Key") != "test-key" {
 			t.Fatalf("missing API key header: %q", r.Header.Get("X-API-Key"))
 		}
@@ -521,11 +524,7 @@ func TestForwardAnthropicSendsNormalizedBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	oldURL := anthropicURL
-	anthropicURL = srv.URL
-	defer func() { anthropicURL = oldURL }()
-
-	resp, err := forwardAnthropic(context.Background(), Config{APIKey: "test-key"}, AnthropicRequest{
+	resp, err := forwardAnthropic(context.Background(), Config{APIKey: "test-key", BaseURL: srv.URL}, AnthropicRequest{
 		Model:     "opencode-go/qwen3.7-max",
 		Thinking:  []byte(`{"type":"enabled"}`),
 		System:    []byte(`[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}]`),
