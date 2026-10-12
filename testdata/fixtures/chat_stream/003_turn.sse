@@ -1,0 +1,19 @@
+data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null,"index":0}],"id":"chatcmpl-mock","model":"glm-5.3-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"reasoning_content":"Reasoning about the next"},"finish_reason":null,"index":0}],"id":"chatcmpl-mock","model":"glm-5.3-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"reasoning_content":" step."},"finish_reason":null,"index":0}],"id":"chatcmpl-mock","model":"glm-5.3-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":"Fixed the subtra"},"finish_reason":null,"index":0}],"id":"chatcmpl-mock","model":"glm-5.3-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":"ction bug in cal"},"finish_reason":null,"index":0}],"id":"chatcmpl-mock","model":"glm-5.3-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":"c.py: `add` now "},"finish_reason":null,"index":0}],"id":"chatcmpl-mock","model":"glm-5.3-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":"returns `a + b`."},"finish_reason":null,"index":0}],"id":"chatcmpl-mock","model":"glm-5.3-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"id":"chatcmpl-mock","model":"glm-5.3-flash","object":"chat.completion.chunk"}
+
+data: {"choices":[],"id":"chatcmpl-mock","model":"glm-5.3-flash","object":"chat.completion.chunk","usage":{"completion_tokens":45,"prompt_tokens":1200,"prompt_tokens_details":{"cached_tokens":1024},"total_tokens":1245}}
+
+data: [DONE]

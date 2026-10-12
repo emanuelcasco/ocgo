@@ -1,0 +1,35 @@
+event: response.created
+data: {"response":{"created_at":1791632575,"id":"resp_2d5e1d547e2e06a8fde5b54e","model":"glm-5.3-flash","object":"response","output":[],"status":"in_progress"},"sequence_number":1,"type":"response.created"}
+
+event: response.in_progress
+data: {"response":{"created_at":1791632575,"id":"resp_2d5e1d547e2e06a8fde5b54e","model":"glm-5.3-flash","object":"response","output":[],"status":"in_progress"},"sequence_number":2,"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"content":[],"id":"msg_resp_2d5e1d547e2e06a8fde5b54e","role":"assistant","status":"in_progress","type":"message"},"output_index":0,"sequence_number":3,"type":"response.output_item.added"}
+
+event: response.content_part.added
+data: {"content_index":0,"item_id":"msg_resp_2d5e1d547e2e06a8fde5b54e","output_index":0,"part":{"annotations":[],"text":"","type":"output_text"},"sequence_number":4,"type":"response.content_part.added"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"Fixed the subtra","item_id":"msg_resp_2d5e1d547e2e06a8fde5b54e","output_index":0,"sequence_number":5,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"ction bug in cal","item_id":"msg_resp_2d5e1d547e2e06a8fde5b54e","output_index":0,"sequence_number":6,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"c.py: `add` now ","item_id":"msg_resp_2d5e1d547e2e06a8fde5b54e","output_index":0,"sequence_number":7,"type":"response.output_text.delta"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"returns `a + b`.","item_id":"msg_resp_2d5e1d547e2e06a8fde5b54e","output_index":0,"sequence_number":8,"type":"response.output_text.delta"}
+
+event: response.output_text.done
+data: {"content_index":0,"item_id":"msg_resp_2d5e1d547e2e06a8fde5b54e","output_index":0,"sequence_number":9,"text":"Fixed the subtraction bug in calc.py: `add` now returns `a + b`.","type":"response.output_text.done"}
+
+event: response.content_part.done
+data: {"content_index":0,"item_id":"msg_resp_2d5e1d547e2e06a8fde5b54e","output_index":0,"part":{"annotations":[],"text":"Fixed the subtraction bug in calc.py: `add` now returns `a + b`.","type":"output_text"},"sequence_number":10,"type":"response.content_part.done"}
+
+event: response.output_item.done
+data: {"item":{"content":[{"annotations":[],"text":"Fixed the subtraction bug in calc.py: `add` now returns `a + b`.","type":"output_text"}],"id":"msg_resp_2d5e1d547e2e06a8fde5b54e","role":"assistant","status":"completed","type":"message"},"output_index":0,"sequence_number":11,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"created_at":1791632575,"id":"resp_2d5e1d547e2e06a8fde5b54e","model":"glm-5.3-flash","object":"response","output":[{"content":[{"annotations":[],"text":"Fixed the subtraction bug in calc.py: `add` now returns `a + b`.","type":"output_text"}],"id":"msg_resp_2d5e1d547e2e06a8fde5b54e","role":"assistant","status":"completed","type":"message"}],"status":"completed","usage":{"input_tokens":1200,"input_tokens_details":{"cached_tokens":1024},"output_tokens":45,"total_tokens":1245}},"sequence_number":12,"type":"response.completed"}

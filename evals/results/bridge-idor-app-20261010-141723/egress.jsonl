@@ -1,0 +1,27 @@
+{"ts":"2026-10-10T13:17:33.074942376Z","host":"chatgpt.com","port":443,"method":"CONNECT","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:33.115038576Z","host":"github.com","port":443,"method":"CONNECT","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:33.180345176Z","host":"api.github.com","port":443,"method":"CONNECT","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:33.413723577Z","host":"127.0.0.1","port":3456,"method":"POST","allowed":true}
+{"ts":"2026-10-10T13:17:35.381914181Z","host":"127.0.0.1","port":3456,"method":"POST","allowed":true}
+{"ts":"2026-10-10T13:17:38.050296486Z","host":"127.0.0.1","port":3456,"method":"POST","allowed":true}
+{"ts":"2026-10-10T13:17:40.493459991Z","host":"bridge-idor.local","port":80,"method":"GET","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:40.502577191Z","host":"localhost","port":80,"method":"GET","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:40.535690892Z","host":"127.0.0.1","port":3456,"method":"POST","allowed":true}
+{"ts":"2026-10-10T13:17:42.326514Z","host":"bridge-idor-app","port":80,"method":"GET","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:42.334797Z","host":"bridge-idor-app.local","port":80,"method":"GET","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:42.3447475Z","host":"idor.local","port":80,"method":"GET","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:42.3526988Z","host":"app.local","port":80,"method":"GET","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:42.3610491Z","host":"target.local","port":80,"method":"GET","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:42.369412101Z","host":"backend","port":80,"method":"GET","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:42.377902401Z","host":"orders.local","port":80,"method":"GET","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:42.385763201Z","host":"bridge-idor-app-20261010-141723","port":80,"method":"GET","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:42.394677701Z","host":"bridge-idor-app-20261010-141723.local","port":80,"method":"GET","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:42.403083301Z","host":"bridge-idor-app.local","port":80,"method":"GET","allowed":false,"reason":"not listed in scope"}
+{"ts":"2026-10-10T13:17:42.436744401Z","host":"127.0.0.1","port":3456,"method":"POST","allowed":true}
+{"ts":"2026-10-10T13:17:49.126361648Z","host":"127.0.0.1","port":3456,"method":"POST","allowed":true}
+{"ts":"2026-10-10T13:17:51.440594726Z","host":"127.0.0.1","port":3456,"method":"POST","allowed":true}
+{"ts":"2026-10-10T13:17:55.311711583Z","host":"127.0.0.1","port":8901,"method":"GET","allowed":true}
+{"ts":"2026-10-10T13:17:55.320730482Z","host":"127.0.0.1","port":8901,"method":"GET","allowed":true}
+{"ts":"2026-10-10T13:17:55.329849682Z","host":"127.0.0.1","port":8901,"method":"GET","allowed":true}
+{"ts":"2026-10-10T13:17:55.363458282Z","host":"127.0.0.1","port":3456,"method":"POST","allowed":true}
+{"ts":"2026-10-10T13:17:59.790996265Z","host":"ab.chatgpt.com","port":443,"method":"CONNECT","allowed":false,"reason":"not listed in scope"}

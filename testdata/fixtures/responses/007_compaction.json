@@ -1,0 +1,108 @@
+{
+ "model": "glm-5.3-flash",
+ "stream": true,
+ "input": [
+  {
+   "type": "message",
+   "id": "msg_1cdb07ee-4cef-5f75-a3df-8e03be12eebe",
+   "role": "developer",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "You are Codex, a coding agent running in a terminal-based coding assistant."
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "id": "msg_01a125a3-022a-7a33-ac97-7af894810843",
+   "role": "developer",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/home/pcbuy/.codex/skills/.system`\n### Available skills\n- imagegen: Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or transparent-background cutouts. Use when Codex should create a brand-new image, transform an existing image, or derive visual variants from references, and the output should be a bitmap asset rather than repo-native code or vector. Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas. (file: r0/imagegen/SKILL.md)\n- openai-docs: Use for Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, customization, automations, and self-knowledge\u2014including 'you,' 'your,' 'this app,' or 'this coding agent' when they refer to Codex\u2014and for OpenAI APIs/products and ChatGPT Work. Also use for model choice/migration, prompting, SDKs, Responses, Realtime, agents, evals, and Chat/Work/Codex comparisons. Do not use for generic app/software tasks that merely mention Codex. (file: r0/openai-docs/SKILL.md)\n- skill-creator: Create or update a Codex skill with appropriately scoped instructions and any needed supporting resources. (file: r0/skill-creator/SKILL.md)\n- skill-installer: Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos). (file: r0/skill-installer/SKILL.md)\n</skills_instructions>"
+    },
+    {
+     "type": "input_text",
+     "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `workspace-write`: The sandbox permits reading files, and editing files in `cwd` and `writable_roots`. Editing files in other directories requires approval. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n The writable roots are `/home/pcbuy/ocgo-compact2/repo`, `/tmp`.\n</permissions instructions>"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "id": "msg_01a125a3-022a-7a33-ac97-7b0aab5aefff",
+   "role": "user",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "<environment_context>\n  <cwd>/home/pcbuy/ocgo-compact2/repo</cwd>\n  <shell>bash</shell>\n  <current_date>2026-10-10</current_date>\n  <timezone>Africa/Algiers</timezone>\n  <filesystem><workspace_roots><root>/home/pcbuy/ocgo-compact2/repo</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry><entry access=\"write\"><path>/home/pcbuy/ocgo-compact2/repo</path></entry><entry access=\"write\"><special>:slash_tmp</special></entry><entry access=\"write\"><special>:tmpdir</special></entry><entry access=\"read\"><path>/home/pcbuy/ocgo-compact2/repo/.git</path></entry><entry access=\"read\"><path>/home/pcbuy/ocgo-compact2/repo/.agents</path></entry><entry access=\"read\"><path>/home/pcbuy/ocgo-compact2/repo/.codex</path></entry><entry access=\"read\"><path>/home/pcbuy/ocgo-compact2/repo/.aws</path></entry></file_system></permission_profile></filesystem>\n</environment_context>"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "id": "msg_01a125a2-f857-7052-9552-9d39e8454dce",
+   "role": "user",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "Do a lot of small steps: run a command repeatedly, then summarise."
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "id": "msg_01a125a3-022a-7a33-ac97-7b1685e073fa",
+   "role": "user",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:\nocgo mock: no tools offered."
+    }
+   ]
+  },
+  {
+   "type": "function_call",
+   "id": "call_mock_1",
+   "name": "exec_command",
+   "arguments": "{\"cmd\":\"echo turn-2 \\u0026\\u0026 ls -la\"}",
+   "call_id": "call_mock_1"
+  },
+  {
+   "type": "function_call_output",
+   "id": "fco_01a125a3-059d-72c3-84ab-6c4aa114de37",
+   "call_id": "call_mock_1",
+   "output": "Chunk ID: 0400b1\nWall time: 0.4154 seconds\nProcess exited with code 0\nOriginal token count: 102\nOutput:\nturn-2\ntotal 20\ndrwxr-xr-x 6 pcbuy pcbuy 4096 Oct 10 12:46 .\ndrwxr-xr-x 5 pcbuy pcbuy 4096 Oct 10 12:46 ..\ndr-xr-xr-x 2 pcbuy pcbuy   40 Oct 10 12:46 .agents\ndr-xr-xr-x 2 pcbuy pcbuy   40 Oct 10 12:46 .aws\ndr-xr-xr-x 2 pcbuy pcbuy   40 Oct 10 12:46 .codex\ndrwxr-xr-x 8 pcbuy pcbuy 4096 Oct 10 12:46 .git\n-rw-r--r-- 1 pcbuy pcbuy   32 Oct 10 12:46 calc.py\n-rw-r--r-- 1 pcbuy pcbuy   17 Oct 10 12:46 notes.txt\n"
+  },
+  {
+   "type": "message",
+   "role": "user",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work.\n"
+    }
+   ]
+  }
+ ],
+ "tools": [],
+ "tool_choice": "auto",
+ "parallel_tool_calls": false,
+ "reasoning": {
+  "effort": "minimal"
+ },
+ "store": false,
+ "include": [
+  "reasoning.encrypted_content"
+ ],
+ "prompt_cache_key": "11111111-1111-4111-8111-111111111111",
+ "client_metadata": {
+  "x-codex-installation-id": "00000000-0000-4000-8000-000000000000",
+  "session_id": "11111111-1111-4111-8111-111111111111",
+  "turn_id": "22222222-2222-4222-8222-222222222222",
+  "thread_id": "11111111-1111-4111-8111-111111111111",
+  "x-codex-turn-metadata": "{\"installation_id\":\"22222222-2222-4222-8222-222222222222\",\"session_id\":\"11111111-1111-4111-8111-111111111111\",\"thread_id\":\"11111111-1111-4111-8111-111111111111\",\"agent_name\":\"/root\",\"turn_id\":\"22222222-2222-4222-8222-222222222222\",\"window_id\":\"11111111-1111-4111-8111-111111111111:1\",\"window_number\":1,\"context_window_id\":\"44444444-4444-4444-8444-444444444444\",\"request_kind\":\"compaction\",\"root_turn_id\":\"22222222-2222-4222-8222-222222222222\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seccomp\",\"sandbox_mode\":\"workspace-write\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"workspaces\":{\"/home/pcbuy/ocgo-compact2/repo\":{\"latest_git_commit_hash\":\"e897e1d1eadd1f12f861f7aef55d7d4c1fbc62da\",\"has_changes\":false}},\"turn_started_at_unix_ms\":1791632799777,\"analytics_enabled\":true,\"compaction\":{\"trigger\":\"auto\",\"reason\":\"context_limit\",\"implementation\":\"responses\",\"phase\":\"mid_turn\",\"strategy\":\"memento\"}}",
+  "x-codex-window-id": "11111111-1111-4111-8111-111111111111:1",
+  "root_turn_id": "22222222-2222-4222-8222-222222222222"
+ }
+}
